@@ -1,0 +1,57 @@
+setpoint
+Copyright 2026 Kadir Efe Yazili
+
+This product includes software developed as part of the setpoint project.
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+
+THIRD-PARTY DEPENDENCIES
+========================
+
+nvidia-ml-py
+    NVIDIA Management Library Python bindings.
+    Copyright NVIDIA Corporation. BSD-3-Clause.
+    https://pypi.org/project/nvidia-ml-py/
+
+gguf
+    GGUF read/write library, maintained in the llama.cpp repository.
+    Copyright the ggml authors. MIT License.
+    https://github.com/ggml-org/llama.cpp
+
+
+PRIOR ART AND REFERENCES
+========================
+
+The design of setpoint was informed by the following projects. No code was copied
+from any of them unless stated otherwise.
+
+gguf-parser-go (Apache-2.0)
+    Static GGUF memory estimation. Its estimation formulas were read as reference
+    while implementing setpoint's own budget model.
+    https://github.com/gpustack/gguf-parser-go
+
+llama-optimus (MIT)
+    Flag search over llama.cpp parameters using Optuna. Informed the search space
+    definition; setpoint uses a different search strategy.
+    https://github.com/BrunoArsioli/llama-optimus
+
+llama-swap (MIT)
+    Model process orchestration and OpenAI-compatible proxying. Informed the
+    configuration and process management design planned for phase 2.
+    https://github.com/mostlygeek/llama-swap
+
+Zeus (Apache-2.0)
+    GPU energy measurement methodology, including the documented sampling
+    limitations of NVML power readings.
+    https://ml.energy/zeus/
+
+mixtral-offloading (MIT), MoE-Infinity (Apache-2.0), KTransformers (Apache-2.0),
+PowerInfer (MIT)
+    Expert caching, activation-aware prefetching and contextual sparsity research
+    referenced for phases 4 and 6.
+
+llama-moe-cache / FATE (AGPL-3.0)
+    Published benchmarks and the cross-layer plus temporal expert prediction
+    approach were referenced as prior art. Because of its license, no code from
+    this project has been or may be incorporated into setpoint.
+    https://github.com/ongunm/llama-moe-cache

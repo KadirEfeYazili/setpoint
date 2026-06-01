@@ -1,0 +1,52 @@
+[project]
+name = "setpoint"
+version = "0.1.0.dev0"
+description = "Measurement-driven configuration for local LLM inference. Finds the setpoint your hardware can actually hold."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+keywords = ["llm", "llama.cpp", "gguf", "vram", "inference", "autotuning", "gpu"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Hardware",
+]
+dependencies = [
+    "nvidia-ml-py>=12.535.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+setpoint = "setpoint.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/KadirEfeYazili/setpoint"
+Issues = "https://github.com/KadirEfeYazili/setpoint/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/setpoint"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
