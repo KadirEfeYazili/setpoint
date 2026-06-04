@@ -1,0 +1,81 @@
+"""Terminal rendering.
+
+Colour is opt-out via NO_COLOR and is disabled automatically when stdout is not a
+terminal, so piping to a file or to jq stays clean.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+RED = "\033[31m"
+YELLOW = "\033[33m"
+GREEN = "\033[32m"
+BLUE = "\033[34m"
+GREY = "\033[90m"
+
+
+def color_enabled(stream: object | None = None) -> bool:
+    if os.environ.get("NO_COLOR") is not None:
+        return False
+    if os.environ.get("SETPOINT_FORCE_COLOR"):
+        return True
+    target = stream if stream is not None else sys.stdout
+    return bool(getattr(target, "isatty", lambda: False)())
+
+
+class Style:
+    def __init__(self, enabled: bool) -> None:
+        self.enabled = enabled
+
+    def _wrap(self, code: str, text: str) -> str:
+        return f"{code}{text}{RESET}" if self.enabled else text
+
+    def bold(self, text: str) -> str:
+        return self._wrap(BOLD, text)
+
+    def dim(self, text: str) -> str:
+        return self._wrap(DIM, text)
+
+    def red(self, text: str) -> str:
+        return self._wrap(RED, text)
+
+    def yellow(self, text: str) -> str:
+        return self._wrap(YELLOW, text)
+
+    def green(self, text: str) -> str:
+        return self._wrap(GREEN, text)
+
+    def blue(self, text: str) -> str:
+        return self._wrap(BLUE, text)
+
+    def grey(self, text: str) -> str:
+        return self._wrap(GREY, text)
+
+
+def wrap(text: str, width: int, indent: str = "") -> list[str]:
+    """Greedy word wrap. Long tokens such as paths are left intact."""
+    words = text.split()
+    if not words:
+        return []
+    lines: list[str] = []
+    current = indent + words[0]
+    for word in words[1:]:
+        if len(current) + 1 + len(word) <= width:
+            current += " " + word
+        else:
+            lines.append(current)
+            current = indent + word
+    lines.append(current)
+    return lines
+
+
+def term_width(default: int = 88) -> int:
+    try:
+        return min(os.get_terminal_size().columns, 100)
+    except OSError:
+        return default
