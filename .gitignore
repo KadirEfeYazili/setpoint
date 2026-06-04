@@ -1,0 +1,62 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Tooling caches ---
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- setpoint runtime output ---
+# Calibration profiles are keyed by a hardware and model signature, so they are
+# meaningless on another machine. Sharing happens through `setpoint profile export`.
+profiles/
+*.setpoint.yaml
+
+# Raw measurement traces from tune and bench runs.
+runs/
+*.trace.json
+bench-*.json
+
+# Models are large binaries and never belong in the repo.
+models/
+*.gguf
+*.bin
+*.safetensors
+
+# Local scratch
+scratch/
+tmp/
+*.log
+
+# --- Local working notes, kept out of the public repo ---
+docs/
+proje-spesifikasyonu.md

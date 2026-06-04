@@ -30,13 +30,13 @@ layers still report as GPU-resident while running 5 to 20 times slower, and noth
 tells you. People conclude their GPU is too weak when the real problem is that nobody
 is measuring.
 
-Three good tools already exist and none of them talk to each other:
+Three kinds of tool already exist, and none of them connect:
 
-| Tool | Does | Does not |
+| Kind | Does | Does not |
 |---|---|---|
-| [gguf-parser-go](https://github.com/gpustack/gguf-parser-go) | Estimates memory from GGUF metadata in seconds | Measure anything |
-| [llama-optimus](https://github.com/BrunoArsioli/llama-optimus) | Searches flag combinations with Optuna | Finish quickly, or share the result |
-| [llama-swap](https://github.com/mostlygeek/llama-swap) | Orchestrates model processes | Tune anything |
+| Static estimators | Compute memory requirements from model metadata in seconds | Measure anything |
+| Flag search tools | Explore parameter combinations by benchmarking | Finish quickly, or produce a result anyone else can reuse |
+| Process orchestrators | Start, stop and route between model servers | Tune anything |
 
 There is no shortage of mechanism. What is missing is policy: something that decides
 what the numbers should be, on this machine, for this model, and can prove it.
@@ -92,10 +92,34 @@ Each phase leaves something usable on its own.
 | 2 | Daemon, OpenAI-compatible proxy, TUI, profile sharing, regression sentinel | Planned |
 | 3 | Request routing, speculative decoding orchestration, quantization advisor | Planned |
 | 4 | Fast model switching, MoE expert cache policy, KV cache tiering | Planned |
-| 5 | MCP server, statusline, resource-aware RAG, agent resource API | Planned |
-| 6 | Contextual sparsity, learned eviction policies, upstream contribution | Research |
+| 5 | Knowledge layer: measured chunking, retrieval policy, embedding placement, search | Planned |
+| 6 | Reasoning layer: MCP server, statusline, agent resource API | Planned |
+| 7 | Contextual sparsity, learned eviction policies, upstream contribution | Research |
 
 Phase 1 targets llama.cpp only. Ollama and vLLM come in phase 2.
+
+## Architecture
+
+setpoint decides across four layers, and all of them settle against the same budget.
+
+| Layer | Decides |
+|---|---|
+| Hardware | How much room is actually available |
+| Execution | What runs, with which settings, and what stays resident |
+| Knowledge | What is retrieved and how it is represented |
+| Reasoning | How to proceed, and when to stop |
+
+What ties them together is that every one of these choices has a measurable resource
+cost and a quality or latency tradeoff. On constrained hardware something has to make
+that tradeoff deliberately.
+
+## Providers
+
+Nothing requires an account, a key or an internet connection. Every external capability
+sits behind a provider interface, and the default provider is always local and keyless.
+Bring your own inference endpoint, search backend, embedding model, reranker or storage
+if you want one; keys stay on your machine and are never written to profiles or logs.
+No provider is privileged.
 
 ## Scope
 
@@ -110,7 +134,3 @@ help rather than producing a number it did not measure.
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
-
-Prior art that shaped the design is credited in [NOTICE](NOTICE). Note that
-[llama-moe-cache](https://github.com/ongunm/llama-moe-cache) is AGPL-3.0; its published
-ideas and benchmarks informed this project, its code did not.
