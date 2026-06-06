@@ -128,7 +128,9 @@ class NvmlProbe:
 
         driver = _decode(self._try("nvmlSystemGetDriverVersion"))
         nvml_ver = _decode(self._try("nvmlSystemGetNVMLVersion"))
-        raw_cuda = self._try("nvmlSystemGetCudaDriverVersion_v2", alt_names=("nvmlSystemGetCudaDriverVersion",))
+        raw_cuda = self._try(
+            "nvmlSystemGetCudaDriverVersion_v2", alt_names=("nvmlSystemGetCudaDriverVersion",)
+        )
 
         cuda_major = cuda_minor = None
         if isinstance(raw_cuda, int) and raw_cuda > 0:
