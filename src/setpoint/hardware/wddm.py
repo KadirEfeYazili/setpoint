@@ -62,7 +62,11 @@ def probe(timeout: float = 20.0) -> tuple[ProbeStatus, tuple[AdapterMemory, ...]
     claim that would wrongly clear the machine of spilling.
     """
     if not is_supported():
-        return ProbeStatus.UNSUPPORTED, (), f"WDDM counters are Windows-only (this is {platform.system()})"
+        return (
+            ProbeStatus.UNSUPPORTED,
+            (),
+            f"WDDM counters are Windows-only (this is {platform.system()})",
+        )
 
     quoted = ",".join(f"'{p}'" for p in _COUNTER_PATHS)
     script = _PS_SCRIPT.replace("{paths}", quoted)
