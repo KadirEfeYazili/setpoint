@@ -124,3 +124,84 @@ class BudgetPlan:
         """Everything the request needs, before any of it is pushed to the CPU."""
         kv_bytes = self.kv.total_bytes if self.kv else 0
         return self.model.weights.total_bytes + kv_bytes
+
+    def to_dict(self) -> dict[str, object]:
+        """The machine-readable form. This is the schema `--json` promises."""
+        model, vram, offload = self.model, self.vram, self.offload
+        payload: dict[str, object] = {
+            "model": {
+                "path": str(model.path),
+                "architecture": model.architecture,
+                "name": model.name,
+                "file_type": model.file_type,
+                "parameters": model.parameter_count,
+                "block_count": model.block_count,
+                "train_context": model.train_context,
+                "vocab_size": model.vocab_size,
+                "moe": model.is_moe,
+                "weight_bytes": {
+                    "blocks": model.weights.block_total_bytes,
+                    "experts": model.weights.expert_total_bytes,
+                    "input": model.weights.input_bytes,
+                    "output": model.weights.output_bytes,
+                    "total": model.weights.total_bytes,
+                },
+            },
+            "vram": {
+                "gpu_index": vram.gpu_index,
+                "gpu_name": vram.gpu_name,
+                "measured": vram.measured,
+                "total_bytes": vram.total_bytes,
+                "free_bytes": vram.free_bytes,
+                "fragmentation_bytes": vram.fragmentation_bytes,
+                "reserve_bytes": vram.reserve_bytes,
+                "runtime_allowance_bytes": vram.runtime_allowance_bytes,
+                "ceiling_bytes": vram.ceiling_bytes,
+                "detail": vram.detail,
+            },
+            "request": {"context": self.context, "required_bytes": self.required_bytes},
+            "plan": {
+                "n_gpu_layers": offload.n_gpu_layers,
+                "block_count": offload.block_count,
+                "output_on_gpu": offload.output_on_gpu,
+                "gpu_bytes": offload.gpu_bytes,
+                "cpu_bytes": offload.cpu_bytes,
+                "weights_on_gpu_bytes": offload.weights_on_gpu_bytes,
+                "kv_on_gpu_bytes": offload.kv_on_gpu_bytes,
+                "fits_fully": offload.fits_fully,
+            },
+            "alternatives": [
+                {
+                    "change": a.change,
+                    "effect": a.effect,
+                    "n_gpu_layers": a.n_gpu_layers,
+                    "freed_bytes": a.freed_bytes,
+                }
+                for a in self.alternatives
+            ],
+            "candidates": [
+                {
+                    "n_gpu_layers": c.n_gpu_layers,
+                    "cache_type_k": c.cache_type_k,
+                    "cache_type_v": c.cache_type_v,
+                    "flash_attn": c.flash_attn,
+                    "origin": c.origin,
+                }
+                for c in self.candidates
+            ],
+            "host_ram_bytes": self.host_ram_bytes,
+            "notes": list(self.notes),
+        }
+        payload["kv_cache"] = (
+            None
+            if self.kv is None
+            else {
+                "context": self.kv.context,
+                "cache_type_k": self.kv.cache_type_k,
+                "cache_type_v": self.kv.cache_type_v,
+                "total_bytes": self.kv.total_bytes,
+                "bytes_per_token": self.kv.bytes_per_token,
+                "upper_bound": self.kv.upper_bound,
+            }
+        )
+        return payload
