@@ -74,6 +74,31 @@ def wrap(text: str, width: int, indent: str = "") -> list[str]:
     return lines
 
 
+def gib(count: float) -> str:
+    """Gibibytes, the unit every VRAM figure is compared in."""
+    return f"{count / 1024**3:.2f} GiB"
+
+
+def human_bytes(count: float) -> str:
+    """Bytes at whichever scale reads naturally. For prose, not for columns."""
+    for limit, unit in ((1024**3, "GiB"), (1024**2, "MiB"), (1024, "KiB")):
+        if abs(count) >= limit:
+            return f"{count / limit:.1f} {unit}"
+    return f"{count:.0f} B"
+
+
+def short_path(path: object, home: str | None = None) -> str:
+    """Collapse the home directory to `~` so paths stay readable in a narrow terminal."""
+    text = str(path).replace("\\", "/")
+    root = (home if home is not None else os.path.expanduser("~")).replace("\\", "/")
+    if root and text.startswith(root):
+        text = "~" + text[len(root) :]
+    head, _, name = text.rpartition("/")
+    if len(name) > 28:
+        name = f"{name[:16]}..{name[-8:]}"
+    return f"{head}/{name}" if head else name
+
+
 def term_width(default: int = 88) -> int:
     try:
         return min(os.get_terminal_size().columns, 100)
