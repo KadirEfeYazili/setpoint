@@ -7,7 +7,7 @@ setpoint subtracts three things it cannot see in that number.
 
 from __future__ import annotations
 
-from ..hardware import HardwareSnapshot
+from ..hardware import GpuStatic, HardwareSnapshot
 from .types import MIB, VramBudget
 
 # Allocators do not pack perfectly, and the last block that "just fits" is the one
@@ -70,7 +70,7 @@ def assumed(
     )
 
 
-def _select(snapshot: HardwareSnapshot, gpu_index: int | None):
+def _select(snapshot: HardwareSnapshot, gpu_index: int | None) -> GpuStatic | None:
     if not snapshot.gpus:
         return None
     if gpu_index is None:
