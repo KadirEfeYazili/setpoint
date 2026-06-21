@@ -25,6 +25,9 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    # Reference GGUF implementation. Not a runtime dependency: the test suite uses it
+    # to write sample files and to check setpoint's own reader against it.
+    "gguf>=0.10",
 ]
 
 [project.scripts]
