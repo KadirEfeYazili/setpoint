@@ -13,9 +13,10 @@ import json
 import sys
 from typing import Any
 
-from . import __version__, doctor
+from . import __version__, budget, doctor
 from .hardware import probe as probe_hardware
-from .render import Style, color_enabled, term_width, wrap
+from .model import ModelError, analyze, resolve
+from .render import Style, color_enabled, gib, human_bytes, short_path, term_width, wrap
 
 EXIT_OK = 0
 EXIT_PROBLEM = 1
@@ -153,6 +154,144 @@ def cmd_hardware(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _row(style: Style, label: str, value: str, comment: str = "") -> None:
+    line = f"  {label:<22}{value:>10}"
+    print(f"{line}   {style.dim(comment)}" if comment else line)
+
+
+def _render_budget(plan: budget.BudgetPlan, reference: str, style: Style) -> None:
+    model, vram, offload = plan.model, plan.vram, plan.offload
+    width = term_width()
+
+    kind = "MoE" if model.is_moe else "dense"
+    parts = [f"{model.architecture} {model.parameter_label} {kind}"]
+    if model.file_type:
+        parts.append(model.file_type)
+    parts.append(f"{model.block_count} blocks")
+    print(style.bold("model"))
+    print(f"  {reference}   {style.dim(', '.join(parts))}")
+    print(f"  {style.grey(short_path(model.path))}   {style.grey(gib(model.file_bytes))}")
+    shape = []
+    if model.train_context:
+        shape.append(f"trained context {model.train_context}")
+    heads, kv_heads = model.attention.uniform_head_count, model.attention.uniform_head_count_kv
+    if heads and kv_heads:
+        shape.append(f"{heads} heads over {kv_heads} KV heads")
+    if model.experts:
+        shape.append(f"{model.experts.used} of {model.experts.count} experts active")
+    if shape:
+        print(f"  {style.dim(', '.join(shape))}")
+
+    title = f"vram  {vram.gpu_name}" if vram.gpu_name else "vram"
+    print(style.bold(f"\n{title}"))
+    _row(style, "total", gib(vram.total_bytes))
+    _row(style, "free", gib(vram.free_bytes), "measured" if vram.measured else "assumed")
+    _row(style, "fragmentation", "-" + gib(vram.fragmentation_bytes))
+    if vram.reserve_bytes:
+        _row(style, "your reserve", "-" + gib(vram.reserve_bytes))
+    _row(
+        style,
+        "runtime allowance",
+        "-" + gib(vram.runtime_allowance_bytes),
+        "estimate; `setpoint tune` measures it",
+    )
+    _row(style, "safe ceiling", gib(vram.ceiling_bytes))
+    if vram.detail:
+        print(f"  {style.grey(vram.detail)}")
+
+    print(style.bold(f"\nneed  at {plan.context} tokens"))
+    _row(style, "weights", gib(model.weights.total_bytes))
+    if plan.kv:
+        label = f"KV cache {plan.kv.cache_type_k}/{plan.kv.cache_type_v}"
+        note = f"{human_bytes(plan.kv.bytes_per_token)} per token"
+        if plan.kv.upper_bound:
+            note += ", upper bound"
+        _row(style, label, gib(plan.kv.total_bytes), note)
+    else:
+        _row(style, "KV cache", "unknown", "not modelled for this architecture")
+    _row(style, "total", gib(plan.required_bytes))
+
+    print(style.bold("\nplan"))
+    placed = f"{offload.blocks_on_gpu} of {offload.block_count}"
+    _row(style, f"-ngl {offload.n_gpu_layers}", placed, "blocks on the GPU")
+    _row(
+        style,
+        "on gpu",
+        gib(offload.gpu_bytes),
+        f"weights {gib(offload.weights_on_gpu_bytes)} + cache {gib(offload.kv_on_gpu_bytes)}",
+    )
+    left_behind = (
+        "the token embedding, which llama.cpp keeps in RAM"
+        if offload.fits_fully
+        else f"{offload.cpu_weight_fraction:.0%} of the model"
+    )
+    _row(style, "on cpu", gib(offload.cpu_bytes), left_behind)
+
+    if plan.alternatives:
+        print(style.bold("\ninstead"))
+        for option in plan.alternatives:
+            freed = f"frees {gib(option.freed_bytes)}" if option.freed_bytes else ""
+            _row(style, option.change, f"-ngl {option.n_gpu_layers}", freed)
+            for line in wrap(option.effect, width - 6):
+                print(style.dim(f"      {line}"))
+
+    for note in plan.notes:
+        print()
+        for line in wrap(f"note: {note}", width - 2):
+            print(style.grey(f"  {line}"))
+
+
+def cmd_budget(args: argparse.Namespace) -> int:
+    try:
+        resolved = resolve(args.model)
+        model = analyze(resolved.path)
+    except ModelError as exc:
+        print(f"setpoint: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    except OSError as exc:
+        print(f"setpoint: cannot read {args.model}: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    allowance = (
+        budget.DEFAULT_RUNTIME_ALLOWANCE_BYTES
+        if args.overhead is None
+        else args.overhead * budget.MIB
+    )
+    ram: int | None = None
+    if args.vram is not None:
+        vram = budget.assumed(
+            args.vram * budget.MIB,
+            reserve_bytes=args.reserve * budget.MIB,
+            fragmentation_pct=args.fragmentation,
+            runtime_allowance_bytes=allowance,
+        )
+    else:
+        snapshot = probe_hardware(include_wddm=False)
+        ram = snapshot.host.total_ram_bytes
+        vram = budget.from_snapshot(
+            snapshot,
+            gpu_index=args.gpu,
+            reserve_bytes=args.reserve * budget.MIB,
+            fragmentation_pct=args.fragmentation,
+            runtime_allowance_bytes=allowance,
+        )
+        if vram is None:
+            print(
+                "setpoint: no NVIDIA GPU was found. Pass --vram MB to budget against a "
+                "card setpoint cannot see.",
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
+
+    plan = budget.plan(model, args.context, vram, args.kv_type, args.kv_type, host_ram_bytes=ram)
+
+    if args.json:
+        print(json.dumps(plan.to_dict(), indent=2))
+    else:
+        _render_budget(plan, resolved.reference, Style(color_enabled()))
+    return EXIT_OK if plan.offload.fits_fully else EXIT_PROBLEM
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="setpoint",
@@ -164,6 +303,52 @@ def build_parser() -> argparse.ArgumentParser:
     p_doctor = sub.add_parser("doctor", help="scan for hardware and configuration traps")
     p_doctor.add_argument("--json", action="store_true", help="emit machine-readable output")
     p_doctor.set_defaults(func=cmd_doctor)
+
+    p_budget = sub.add_parser(
+        "budget",
+        help="estimate what a model needs and what fits on the GPU",
+        description=(
+            "Estimate weights, KV cache and the resulting offload split without running "
+            "anything. Exits 0 when the request fits entirely on the GPU, 1 when part of "
+            "it has to stay on the CPU."
+        ),
+    )
+    p_budget.add_argument("model", help="path to a .gguf file, or an Ollama model name")
+    p_budget.add_argument(
+        "-c", "--context", type=int, default=4096, help="target context length in tokens"
+    )
+    p_budget.add_argument(
+        "--kv-type",
+        default="f16",
+        choices=sorted(budget.CACHE_TYPES),
+        help="KV cache quantization",
+    )
+    p_budget.add_argument("--gpu", type=int, help="GPU index, when the machine has more than one")
+    p_budget.add_argument(
+        "--reserve", type=int, default=0, metavar="MB", help="VRAM to keep free for yourself"
+    )
+    p_budget.add_argument(
+        "--overhead",
+        type=int,
+        metavar="MB",
+        help="allowance for the driver context and compute buffers of the process that "
+        "does not exist yet (default 192)",
+    )
+    p_budget.add_argument(
+        "--fragmentation",
+        type=float,
+        default=budget.DEFAULT_FRAGMENTATION_PCT,
+        metavar="PCT",
+        help="share of free VRAM held back for allocator fragmentation",
+    )
+    p_budget.add_argument(
+        "--vram",
+        type=int,
+        metavar="MB",
+        help="budget against a card of this size instead of the installed one",
+    )
+    p_budget.add_argument("--json", action="store_true", help="emit machine-readable output")
+    p_budget.set_defaults(func=cmd_budget)
 
     p_hardware = sub.add_parser("hardware", help="show the raw hardware snapshot")
     p_hardware.add_argument("--json", action="store_true", help="emit machine-readable output")
