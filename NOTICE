@@ -15,3 +15,13 @@ vendored into this repository.
 nvidia-ml-py
     NVIDIA Management Library Python bindings.
     Copyright NVIDIA Corporation. BSD-3-Clause.
+
+
+DEVELOPMENT DEPENDENCIES
+========================
+
+Used by the test suite only. Not installed with setpoint and not shipped with it.
+
+gguf
+    Reference GGUF reader and writer. MIT. The test suite writes sample files with it
+    and checks setpoint's own GGUF reader against it.

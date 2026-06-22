@@ -12,8 +12,8 @@
 `setpoint` finds the configuration your hardware can actually hold, by measuring it
 instead of guessing, and remembers the answer.
 
-> **Status: early development.** Nothing here is usable yet. The hardware layer and
-> `doctor` are being built first. See [Roadmap](#roadmap).
+> **Status: early development.** `doctor` and `budget` run today. `tune`, `run`, `bench`
+> and `profile` do not exist yet. See [Roadmap](#roadmap).
 
 ---
 
@@ -80,6 +80,49 @@ setpoint doctor
 ```
 
 Requires Python 3.10+ and, for GPU checks, an NVIDIA driver.
+
+## Budgeting
+
+`budget` runs nothing and measures no throughput. It reads the model header, reads what
+the driver reports as free, and works out where the split has to fall.
+
+```
+$ setpoint budget qwen3:8b -c 8192
+
+model
+  qwen3:8b   qwen3 8.2B dense, Q4_K_M, 36 blocks
+
+vram  NVIDIA GeForce GTX 1650
+  total                   4.00 GiB
+  free                    3.87 GiB   measured
+  fragmentation          -0.12 GiB
+  runtime allowance      -0.19 GiB   estimate; `setpoint tune` measures it
+  safe ceiling            3.57 GiB
+
+need  at 8192 tokens
+  weights                 4.86 GiB
+  KV cache f16/f16        1.12 GiB   144.0 KiB per token
+  total                   5.99 GiB
+
+plan
+  -ngl 24                 24 of 36   blocks on the GPU
+  on cpu                  2.53 GiB   42% of the model
+
+instead
+  -ctk q8_0 -ctv q8_0      -ngl 27   frees 0.53 GiB
+  -c 4096                  -ngl 27   frees 0.56 GiB
+```
+
+It exits 0 when the request fits entirely on the GPU and 1 when part of it has to stay
+on the CPU, so it composes into scripts. `--json` emits the whole plan, including the
+candidate configurations the tuner will start from. The model argument takes a path to
+a `.gguf` file or the name of a model you already have locally.
+
+Two figures are honest about what they are. The runtime allowance covers the driver
+context and compute buffers of a process that has not started yet, so it is a stated
+default rather than a measurement. And where an architecture's KV cache does not follow
+the usual per-head layout, setpoint says it cannot size it instead of printing a number
+it did not derive.
 
 ## Roadmap
 
