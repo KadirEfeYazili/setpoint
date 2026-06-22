@@ -1,0 +1,224 @@
+"""llama.cpp backend adapter, driven through llama-bench.
+
+llama-bench is used rather than a timed llama-cli run because it already repeats each
+test, discards a warmup pass, and reports every repetition individually. setpoint reads
+those raw repetitions and derives its own median and spread; the mean and standard
+deviation the tool prints are not used.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import time
+from pathlib import Path
+
+from ..measure import Statistic
+from .types import BackendBuild, BackendError, BenchRun, BenchSample, RunSpec, TestKind
+
+BINARY_NAME = "llama-bench"
+
+# Points setpoint at a binary that is not on PATH.
+BINARY_ENV_VAR = "SETPOINT_LLAMA_BENCH"
+
+# A deep-context run repeats a long prefill several times, so the ceiling is generous.
+DEFAULT_TIMEOUT_S = 900.0
+
+# Flash attention took 0|1 before it took on|off|auto. Builds older than this are not
+# driven; the flag is spelled the modern way.
+MIN_SUPPORTED_BUILD = 6000
+
+
+def find_binary(explicit: str | Path | None = None) -> Path | None:
+    """Locate llama-bench: an explicit path, then the environment, then PATH."""
+    for candidate in (explicit, os.environ.get(BINARY_ENV_VAR)):
+        if candidate:
+            path = Path(candidate).expanduser()
+            return path if path.is_file() else None
+    found = shutil.which(BINARY_NAME)
+    return Path(found) if found else None
+
+
+class LlamaCppBackend:
+    """Runs one configuration and reports what it measured."""
+
+    name = "llama.cpp"
+
+    def __init__(self, binary: str | Path | None = None) -> None:
+        self.binary = find_binary(binary)
+
+    @property
+    def available(self) -> bool:
+        return self.binary is not None
+
+    def build_argv(self, spec: RunSpec) -> list[str]:
+        """The exact command line for a configuration.
+
+        Warmup is deliberately left on: the first pass of any configuration is not a
+        measurement, and skipping it would break the discipline the profiles rest on.
+        """
+        if self.binary is None:
+            raise BackendError(
+                f"{BINARY_NAME} was not found. Put it on PATH or set {BINARY_ENV_VAR}."
+            )
+        argv = [
+            str(self.binary),
+            "-m",
+            str(spec.model_path),
+            "-o",
+            "json",
+            "-r",
+            str(spec.repetitions),
+            "-p",
+            str(spec.n_prompt),
+            "-n",
+            str(spec.n_gen),
+        ]
+        if spec.n_depth:
+            argv += ["-d", str(spec.n_depth)]
+        if spec.n_gpu_layers is not None:
+            argv += ["-ngl", str(spec.n_gpu_layers)]
+        if spec.n_cpu_moe is not None:
+            argv += ["-ncmoe", str(spec.n_cpu_moe)]
+        if spec.batch_size is not None:
+            argv += ["-b", str(spec.batch_size)]
+        if spec.ubatch_size is not None:
+            argv += ["-ub", str(spec.ubatch_size)]
+        if spec.threads is not None:
+            argv += ["-t", str(spec.threads)]
+        argv += ["-ctk", spec.cache_type_k, "-ctv", spec.cache_type_v]
+        if spec.flash_attn is not None:
+            argv += ["-fa", "on" if spec.flash_attn else "off"]
+        if spec.main_gpu is not None:
+            argv += ["-mg", str(spec.main_gpu)]
+        for override in spec.tensor_overrides:
+            argv += ["-ot", override]
+        return argv
+
+    def run(self, spec: RunSpec, timeout_s: float = DEFAULT_TIMEOUT_S) -> BenchRun:
+        """Measure one configuration. Raises `BackendError` if the run did not produce data."""
+        argv = self.build_argv(spec)
+        started = time.perf_counter()
+        try:
+            completed = subprocess.run(
+                argv, capture_output=True, text=True, timeout=timeout_s, check=False
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise BackendError(f"{BINARY_NAME} did not finish within {timeout_s:.0f}s") from exc
+        except OSError as exc:
+            raise BackendError(f"{BINARY_NAME} could not be started: {exc}") from exc
+        elapsed = time.perf_counter() - started
+
+        if completed.returncode != 0:
+            raise BackendError(
+                f"{BINARY_NAME} exited with code {completed.returncode}: "
+                f"{_tail(completed.stderr)}"
+            )
+        return parse_output(completed.stdout, spec, command=tuple(argv), duration_s=elapsed)
+
+
+def parse_output(
+    stdout: str,
+    spec: RunSpec,
+    command: tuple[str, ...] = (),
+    duration_s: float | None = None,
+) -> BenchRun:
+    """Turn llama-bench JSON into a `BenchRun`."""
+    records = _load_records(stdout)
+    if not records:
+        raise BackendError(f"{BINARY_NAME} produced no results")
+
+    notes: list[str] = []
+    samples = tuple(_sample(record, notes) for record in records)
+    first = records[0]
+    build = BackendBuild(
+        name=LlamaCppBackend.name,
+        commit=_str(first, "build_commit"),
+        number=_int(first, "build_number"),
+        accelerators=_str(first, "backends"),
+    )
+    if build.number is not None and build.number < MIN_SUPPORTED_BUILD:
+        notes.append(
+            f"Build {build.number} is older than the versions setpoint drives; flag "
+            "spellings may differ and the result may not mean what it says."
+        )
+
+    return BenchRun(
+        spec=spec,
+        build=build,
+        samples=samples,
+        gpu_info=_str(first, "gpu_info"),
+        cpu_info=_str(first, "cpu_info"),
+        command=command,
+        duration_s=duration_s,
+        notes=tuple(dict.fromkeys(notes)),
+    )
+
+
+def _load_records(stdout: str) -> list[dict[str, object]]:
+    """Pull the JSON array out of stdout, ignoring anything printed around it."""
+    start, end = stdout.find("["), stdout.rfind("]")
+    if start < 0 or end < start:
+        raise BackendError(f"{BINARY_NAME} output held no JSON array")
+    try:
+        records = json.loads(stdout[start : end + 1])
+    except json.JSONDecodeError as exc:
+        raise BackendError(f"{BINARY_NAME} output was not valid JSON: {exc}") from exc
+    if not isinstance(records, list):
+        raise BackendError(f"{BINARY_NAME} output was not a list of results")
+    return [r for r in records if isinstance(r, dict)]
+
+
+def _sample(record: dict[str, object], notes: list[str]) -> BenchSample:
+    n_prompt = _int(record, "n_prompt") or 0
+    n_gen = _int(record, "n_gen") or 0
+    kind = TestKind.DECODE if n_gen else TestKind.PREFILL
+
+    throughput = _series(record, "samples_ts", "avg_ts", notes)
+    duration = _series(record, "samples_ns", "avg_ns", notes)
+    return BenchSample(
+        kind=kind,
+        n_prompt=n_prompt,
+        n_gen=n_gen,
+        n_depth=_int(record, "n_depth") or 0,
+        throughput=throughput,
+        duration_ns=duration,
+        reported_mean_ts=_float(record, "avg_ts"),
+    )
+
+
+def _series(record: dict[str, object], key: str, mean_key: str, notes: list[str]) -> Statistic:
+    """Prefer the raw repetitions; fall back to the mean and say so."""
+    values = record.get(key)
+    if isinstance(values, list) and values:
+        return Statistic(tuple(float(v) for v in values))
+    mean = _float(record, mean_key)
+    if mean is None:
+        return Statistic(())
+    notes.append(
+        "This build reported no per-repetition samples, so the spread could not be "
+        "checked and the result cannot back a profile."
+    )
+    return Statistic((mean,))
+
+
+def _tail(text: str, lines: int = 5) -> str:
+    stripped = [line for line in (text or "").splitlines() if line.strip()]
+    return " / ".join(stripped[-lines:]) if stripped else "no output"
+
+
+def _str(record: dict[str, object], key: str) -> str | None:
+    value = record.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _int(record: dict[str, object], key: str) -> int | None:
+    value = record.get(key)
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _float(record: dict[str, object], key: str) -> float | None:
+    value = record.get(key)
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
