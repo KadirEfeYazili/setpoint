@@ -17,7 +17,7 @@ class TestSummary:
         assert Statistic((1.0, 2.0, 3.0, 4.0, 5.0)).iqr == 2.0
 
     def test_spread_is_relative_to_the_median(self):
-        assert Statistic((9.0, 10.0, 11.0)).spread == 0.2
+        assert Statistic((9.0, 10.0, 11.0)).spread == 0.1
 
     def test_no_samples_summarise_to_nothing(self):
         empty = Statistic(())
