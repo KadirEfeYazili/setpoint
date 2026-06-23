@@ -12,8 +12,8 @@ from .types import (
     BackendError,
     BenchRun,
     BenchSample,
+    MeasurementKind,
     RunSpec,
-    TestKind,
 )
 
 __all__ = [
@@ -25,7 +25,7 @@ __all__ = [
     "BenchSample",
     "LlamaCppBackend",
     "RunSpec",
-    "TestKind",
+    "MeasurementKind",
     "find_binary",
     "parse_output",
 ]

@@ -54,8 +54,10 @@ class Statistic:
     def reliable(self) -> bool:
         """Whether this result may be written to a profile."""
         spread = self.spread
-        return self.runs >= MIN_RELIABLE_RUNS and spread is not None and (
-            spread <= MAX_RELIABLE_SPREAD
+        return (
+            self.runs >= MIN_RELIABLE_RUNS
+            and spread is not None
+            and (spread <= MAX_RELIABLE_SPREAD)
         )
 
     def to_dict(self) -> dict[str, object]:

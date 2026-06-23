@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import shutil
 
+from ..backend import BINARY_ENV_VAR, find_binary
 from ..hardware import ACTIVE_THROTTLE_REASONS, MIB, HardwareSnapshot, ProbeStatus, match_adapter
 from .types import Finding, Outcome, Severity
 
@@ -122,8 +123,10 @@ def check_cuda_support(snap: HardwareSnapshot) -> list[Finding]:
                 why="Those binaries will refuse to start, or fall back to CPU-only "
                 "execution, on this driver. CPU-only inference is typically 5-20x "
                 "slower than GPU inference -- and the fallback is often silent.",
-                fix="Either update the NVIDIA driver, or build llama.cpp yourself "
-                "against the CUDA toolkit your driver supports.",
+                fix="Update the NVIDIA driver, or use a llama.cpp build that does not "
+                "need a recent CUDA runtime: the Vulkan release binaries run on this "
+                "driver generation. Building against the CUDA toolkit the driver does "
+                "support also works, and costs more time.",
                 evidence=evidence,
             )
         ]
@@ -416,16 +419,18 @@ def check_backend(snap: HardwareSnapshot) -> list[Finding]:
     found = {k: v for k, v in binaries.items() if v}
     ollama = shutil.which("ollama")
 
-    evidence: dict[str, object] = {"llama_cpp": found, "ollama": ollama}
+    # find_binary also honours the override, so a binary outside PATH still counts.
+    bench = find_binary()
+    evidence: dict[str, object] = {"llama_cpp": found, "ollama": ollama, "llama_bench": str(bench)}
 
-    if "llama-bench" in found:
+    if bench is not None:
         return [
             Finding(
                 check_id="backend.llama-cpp",
                 title="llama.cpp backend",
                 outcome=Outcome.PASS,
                 severity=Severity.INFO,
-                what=f"llama-bench found at {found['llama-bench']}.",
+                what=f"llama-bench found at {bench}.",
                 evidence=evidence,
             )
         ]
@@ -443,7 +448,8 @@ def check_backend(snap: HardwareSnapshot) -> list[Finding]:
             what=what,
             why="setpoint tunes by measuring, and llama-bench is how it measures. "
             "Without it, only `setpoint budget` (static estimation) can run.",
-            fix="Install a llama.cpp release build and put its binaries on PATH: "
+            fix="Install a llama.cpp release build and put its binaries on PATH, or "
+            f"point setpoint at one with {BINARY_ENV_VAR}: "
             "https://github.com/ggml-org/llama.cpp/releases",
             evidence=evidence,
         )
