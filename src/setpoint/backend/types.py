@@ -19,8 +19,8 @@ class BackendError(Exception):
     """The backend could not be found, could not run, or returned something unreadable."""
 
 
-class TestKind(str, Enum):
-    """What a single measurement measured.
+class MeasurementKind(str, Enum):
+    """Which half of a run a measurement describes.
 
     llama-bench reports prompt processing and token generation as separate results of
     the same invocation, and they answer different questions: prefill decides how long
@@ -90,7 +90,7 @@ class BenchSample:
     repetitions instead and derives its own median and spread from them.
     """
 
-    kind: TestKind
+    kind: MeasurementKind
     n_prompt: int
     n_gen: int
     n_depth: int
@@ -120,7 +120,7 @@ class BenchRun:
     duration_s: float | None = None
     notes: tuple[str, ...] = field(default_factory=tuple)
 
-    def sample_of(self, kind: TestKind) -> BenchSample | None:
+    def sample_of(self, kind: MeasurementKind) -> BenchSample | None:
         for sample in self.samples:
             if sample.kind is kind:
                 return sample
@@ -128,12 +128,12 @@ class BenchRun:
 
     @property
     def decode_tokens_per_second(self) -> float | None:
-        sample = self.sample_of(TestKind.DECODE)
+        sample = self.sample_of(MeasurementKind.DECODE)
         return sample.tokens_per_second if sample else None
 
     @property
     def prefill_tokens_per_second(self) -> float | None:
-        sample = self.sample_of(TestKind.PREFILL)
+        sample = self.sample_of(MeasurementKind.PREFILL)
         return sample.tokens_per_second if sample else None
 
     @property

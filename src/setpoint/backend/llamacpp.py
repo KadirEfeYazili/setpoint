@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 from ..measure import Statistic
-from .types import BackendBuild, BackendError, BenchRun, BenchSample, RunSpec, TestKind
+from .types import BackendBuild, BackendError, BenchRun, BenchSample, MeasurementKind, RunSpec
 
 BINARY_NAME = "llama-bench"
 
@@ -113,8 +113,7 @@ class LlamaCppBackend:
 
         if completed.returncode != 0:
             raise BackendError(
-                f"{BINARY_NAME} exited with code {completed.returncode}: "
-                f"{_tail(completed.stderr)}"
+                f"{BINARY_NAME} exited with code {completed.returncode}: {_tail(completed.stderr)}"
             )
         return parse_output(completed.stdout, spec, command=tuple(argv), duration_s=elapsed)
 
@@ -174,7 +173,7 @@ def _load_records(stdout: str) -> list[dict[str, object]]:
 def _sample(record: dict[str, object], notes: list[str]) -> BenchSample:
     n_prompt = _int(record, "n_prompt") or 0
     n_gen = _int(record, "n_gen") or 0
-    kind = TestKind.DECODE if n_gen else TestKind.PREFILL
+    kind = MeasurementKind.DECODE if n_gen else MeasurementKind.PREFILL
 
     throughput = _series(record, "samples_ts", "avg_ts", notes)
     duration = _series(record, "samples_ns", "avg_ns", notes)
