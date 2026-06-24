@@ -19,6 +19,7 @@ classifiers = [
 ]
 dependencies = [
     "nvidia-ml-py>=12.535.0",
+    "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]

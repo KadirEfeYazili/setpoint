@@ -143,8 +143,7 @@ class Measurement:
             return f"only {self.runs} runs were counted, and {MIN_RELIABLE_RUNS} are required"
         worst = max(s.spread for s in self.summaries)
         return (
-            f"the spread was {worst:.1%}, above the {MAX_RELIABLE_SPREAD:.0%} a profile "
-            "may carry"
+            f"the spread was {worst:.1%}, above the {MAX_RELIABLE_SPREAD:.0%} a profile may carry"
         )
 
 
