@@ -14,6 +14,7 @@ import sys
 from typing import Any
 
 from . import __version__, budget, doctor
+from . import profile as profiles
 from .hardware import probe as probe_hardware
 from .model import ModelError, analyze, resolve
 from .render import Style, color_enabled, gib, human_bytes, short_path, term_width, wrap
@@ -290,6 +291,125 @@ def cmd_budget(args: argparse.Namespace) -> int:
     else:
         _render_budget(plan, resolved.reference, Style(color_enabled()))
     return EXIT_OK if plan.offload.fits_fully else EXIT_PROBLEM
+
+
+def _render_profile(profile: profiles.Profile, style: Style) -> None:
+    signature, config, measurement = profile.signature, profile.config, profile.measurement
+    print(style.bold("model"))
+    print(f"  {profile.model.label}")
+    if profile.model.path:
+        print(f"  {style.grey(short_path(profile.model.path))}")
+    print(f"  {style.dim(signature.model_digest[:23] + '...')} ({signature.model_digest_kind})")
+
+    print()
+    print(style.bold("valid for"))
+    _row(style, "gpu", signature.gpu.split()[-1], signature.gpu)
+    _row(style, "vram", f"{signature.vram_total_mb} MB")
+    _row(style, "driver", signature.driver)
+    _row(style, "backend", "", signature.backend)
+    _row(style, "platform", "", signature.platform)
+
+    print()
+    print(style.bold(f"target  {profile.target.context} tokens, {profile.target.optimize.value}"))
+    for name, value in _config_rows(config):
+        _row(style, name, value)
+
+    print()
+    print(style.bold("measured"))
+    _row(
+        style,
+        "decode",
+        f"{measurement.decode_tok_s.median:.2f} t/s",
+        f"{measurement.runs} runs, spread {measurement.decode_tok_s.spread:.1%}",
+    )
+    if measurement.prefill_tok_s:
+        _row(style, "prefill", f"{measurement.prefill_tok_s.median:.1f} t/s")
+    if measurement.peak_vram_mb:
+        _row(style, "peak vram", f"{measurement.peak_vram_mb} MB")
+    if measurement.avg_watt:
+        _row(style, "power", f"{measurement.avg_watt:.0f} W", "indicative, see NVML sampling")
+
+    baseline = profile.baseline
+    verdict = f"{baseline.speedup:.2f}x"
+    print()
+    print(style.bold("against baseline"))
+    _row(style, baseline.label, f"{baseline.decode_tok_s:.2f} t/s")
+    painted = style.green(verdict) if baseline.improved else style.yellow(verdict)
+    _row(style, "speedup", "", painted + ("" if baseline.improved else "  slower than baseline"))
+
+    for note in profile.notes:
+        print()
+        print(style.grey(f"  note: {note}"))
+
+
+def _config_rows(config: profiles.Config) -> list[tuple[str, str]]:
+    rows = [("-ngl", str(config.n_gpu_layers)) if config.n_gpu_layers is not None else None]
+    if config.n_cpu_moe is not None:
+        rows.append(("-ncmoe", str(config.n_cpu_moe)))
+    rows.append(("kv cache", f"{config.cache_type_k}/{config.cache_type_v}"))
+    if config.flash_attn is not None:
+        rows.append(("flash attention", "on" if config.flash_attn else "off"))
+    for label, value in (
+        ("-b", config.batch_size),
+        ("-ub", config.ubatch_size),
+        ("-t", config.threads),
+    ):
+        if value is not None:
+            rows.append((label, str(value)))
+    for override in config.tensor_overrides:
+        rows.append(("-ot", override))
+    return [r for r in rows if r]
+
+
+def cmd_profile(args: argparse.Namespace) -> int:
+    directory = profiles.profiles_dir()
+    style = Style(color_enabled())
+
+    if args.action == "path":
+        print(directory)
+        return EXIT_OK
+
+    try:
+        stored = profiles.load_all(directory)
+    except OSError as exc:
+        print(f"setpoint: cannot read {directory}: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    if args.action == "show":
+        wanted = [p for p in stored if profiles.signature_id(p.signature).startswith(args.id)]
+        if not wanted:
+            print(f"setpoint: no profile starts with {args.id!r}", file=sys.stderr)
+            return EXIT_ERROR
+        if len(wanted) > 1:
+            print(f"setpoint: {args.id!r} matches {len(wanted)} profiles", file=sys.stderr)
+            return EXIT_ERROR
+        if args.json:
+            print(json.dumps(profiles.to_mapping(wanted[0]), indent=2))
+        else:
+            _render_profile(wanted[0], style)
+        return EXIT_OK
+
+    if args.json:
+        print(json.dumps([profiles.to_mapping(p) for p in stored], indent=2))
+        return EXIT_OK
+
+    if not stored:
+        print("no profiles yet. `setpoint tune <model>` measures one and writes it here.")
+        print(style.grey(f"  {short_path(directory)}"))
+        return EXIT_OK
+
+    print(f"  {'id':<18}{'model':<30}{'ctx':>7}{'-ngl':>6}{'decode':>12}{'vs base':>10}")
+    for stored_profile in stored:
+        speedup = f"{stored_profile.baseline.speedup:.2f}x"
+        print(
+            f"  {profiles.signature_id(stored_profile.signature):<18}"
+            f"{stored_profile.model.label[:29]:<30}"
+            f"{stored_profile.target.context:>7}"
+            f"{stored_profile.config.n_gpu_layers if stored_profile.config.n_gpu_layers else '-':>6}"
+            f"{stored_profile.measurement.decode_tok_s.median:>10.2f} t/s"
+            f"{speedup:>10}"
+        )
+    return EXIT_OK
 
 
 def build_parser() -> argparse.ArgumentParser:

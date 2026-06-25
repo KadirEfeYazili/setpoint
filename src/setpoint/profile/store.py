@@ -21,6 +21,7 @@ from .types import (
     Baseline,
     Config,
     Measurement,
+    ModelRef,
     Objective,
     Profile,
     ProfileError,
@@ -118,6 +119,7 @@ def to_mapping(profile: Profile) -> dict[str, Any]:
             "backend": profile.signature.backend,
             "platform": profile.signature.platform,
         },
+        "model": _model_mapping(profile.model),
         "target": {
             "context": profile.target.context,
             "optimize": profile.target.optimize.value,
@@ -177,7 +179,28 @@ def from_mapping(raw: dict[str, Any], source: Path | None = None) -> Profile:
             speedup=float(_require(baseline_raw, "speedup", (int, float), where)),
         ),
         created=_require(raw, "created", str, where),
+        model=_read_model(raw.get("model")),
         notes=tuple(str(n) for n in raw.get("notes") or ()),
+    )
+
+
+def _model_mapping(model: ModelRef) -> dict[str, Any]:
+    return {
+        "name": model.name,
+        "architecture": model.architecture,
+        "file_type": model.file_type,
+        "path": model.path,
+    }
+
+
+def _read_model(raw: Any) -> ModelRef:
+    if not isinstance(raw, dict):
+        return ModelRef()
+    return ModelRef(
+        name=raw.get("name"),
+        architecture=raw.get("architecture"),
+        file_type=raw.get("file_type"),
+        path=raw.get("path"),
     )
 
 

@@ -70,6 +70,27 @@ class Signature:
 
 
 @dataclass(frozen=True)
+class ModelRef:
+    """Which model this is, for humans and for `setpoint run`.
+
+    Not part of the signature and never used for matching. `path` records where the
+    file was when it was measured and may since have moved.
+    """
+
+    name: str | None = None
+    architecture: str | None = None
+    file_type: str | None = None
+    path: str | None = None
+
+    @property
+    def label(self) -> str:
+        for candidate in (self.name, self.architecture):
+            if candidate:
+                return f"{candidate} {self.file_type}" if self.file_type else candidate
+        return "unknown model"
+
+
+@dataclass(frozen=True)
 class Target:
     context: int
     optimize: Objective = Objective.SPEED
@@ -169,6 +190,7 @@ class Profile:
     measurement: Measurement
     baseline: Baseline
     created: str
+    model: ModelRef = field(default_factory=ModelRef)
     notes: tuple[str, ...] = field(default_factory=tuple)
 
     @property
