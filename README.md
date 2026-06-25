@@ -12,8 +12,9 @@
 `setpoint` finds the configuration your hardware can actually hold, by measuring it
 instead of guessing, and remembers the answer.
 
-> **Status: early development.** `doctor` and `budget` run today. `tune`, `run`, `bench`
-> and `profile` do not exist yet. See [Roadmap](#roadmap).
+> **Status: early development.** `doctor`, `budget` and `profile` run today. `tune`,
+> `run` and `bench` need a llama.cpp build to measure with, which the development
+> machine does not have yet. See [Roadmap](#roadmap).
 
 ---
 

@@ -117,6 +117,11 @@ class TestRoundTrip:
         payload = yaml.safe_load(store.dumps(profile()))
         assert set(payload["measurement"]["decode_tok_s"]) == {"median", "iqr", "spread"}
 
+    def test_stored_numbers_carry_no_binary_float_noise(self):
+        # A file people edit by hand must not read like 0.019999999999999574.
+        stat = yaml.safe_load(store.dumps(profile()))["measurement"]["decode_tok_s"]
+        assert all(len(repr(v).partition(".")[2]) <= 6 for v in stat.values())
+
 
 class TestReadingRules:
     def _write(self, tmp_path: Path, mutate) -> Path:
