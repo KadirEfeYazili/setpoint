@@ -7,7 +7,18 @@ another language does not have to read Python to know what to write.
 from __future__ import annotations
 
 from .signature import build_signature, model_digest, platform_tag, signature_id
-from .store import HOME_ENV_VAR, dumps, find, home, load, load_all, now, profiles_dir, save
+from .store import (
+    HOME_ENV_VAR,
+    dumps,
+    find,
+    home,
+    load,
+    load_all,
+    now,
+    profiles_dir,
+    save,
+    to_mapping,
+)
 from .types import (
     DIGEST_CONTENT,
     DIGEST_HEADER,
@@ -51,4 +62,5 @@ __all__ = [
     "profiles_dir",
     "save",
     "signature_id",
+    "to_mapping",
 ]

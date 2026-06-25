@@ -470,6 +470,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_budget.add_argument("--json", action="store_true", help="emit machine-readable output")
     p_budget.set_defaults(func=cmd_budget)
 
+    p_profile = sub.add_parser(
+        "profile",
+        help="inspect stored calibration profiles",
+        description=(
+            "Profiles are written by `setpoint tune` and keyed by a hardware and model "
+            "signature. A profile whose measurement is not reliable is never stored."
+        ),
+    )
+    p_profile.add_argument(
+        "action", choices=("list", "show", "path"), nargs="?", default="list"
+    )
+    p_profile.add_argument("id", nargs="?", help="profile id, or any unambiguous prefix")
+    p_profile.add_argument("--json", action="store_true", help="emit machine-readable output")
+    p_profile.set_defaults(func=cmd_profile)
+
     p_hardware = sub.add_parser("hardware", help="show the raw hardware snapshot")
     p_hardware.add_argument("--json", action="store_true", help="emit machine-readable output")
     p_hardware.add_argument(
