@@ -303,7 +303,7 @@ def _render_profile(profile: profiles.Profile, style: Style) -> None:
 
     print()
     print(style.bold("valid for"))
-    _row(style, "gpu", signature.gpu.split()[-1], signature.gpu)
+    _row(style, "gpu", "", signature.gpu)
     _row(style, "vram", f"{signature.vram_total_mb} MB")
     _row(style, "driver", signature.driver)
     _row(style, "backend", "", signature.backend)
@@ -399,15 +399,15 @@ def cmd_profile(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     print(f"  {'id':<18}{'model':<30}{'ctx':>7}{'-ngl':>6}{'decode':>12}{'vs base':>10}")
-    for stored_profile in stored:
-        speedup = f"{stored_profile.baseline.speedup:.2f}x"
+    for entry in stored:
+        layers = entry.config.n_gpu_layers
         print(
-            f"  {profiles.signature_id(stored_profile.signature):<18}"
-            f"{stored_profile.model.label[:29]:<30}"
-            f"{stored_profile.target.context:>7}"
-            f"{stored_profile.config.n_gpu_layers if stored_profile.config.n_gpu_layers else '-':>6}"
-            f"{stored_profile.measurement.decode_tok_s.median:>10.2f} t/s"
-            f"{speedup:>10}"
+            f"  {profiles.signature_id(entry.signature):<18}"
+            f"{entry.model.label[:29]:<30}"
+            f"{entry.target.context:>7}"
+            f"{layers if layers is not None else '-':>6}"
+            f"{entry.measurement.decode_tok_s.median:>10.2f} t/s"
+            f"{entry.baseline.speedup:>9.2f}x"
         )
     return EXIT_OK
 
@@ -478,9 +478,7 @@ def build_parser() -> argparse.ArgumentParser:
             "signature. A profile whose measurement is not reliable is never stored."
         ),
     )
-    p_profile.add_argument(
-        "action", choices=("list", "show", "path"), nargs="?", default="list"
-    )
+    p_profile.add_argument("action", choices=("list", "show", "path"), nargs="?", default="list")
     p_profile.add_argument("id", nargs="?", help="profile id, or any unambiguous prefix")
     p_profile.add_argument("--json", action="store_true", help="emit machine-readable output")
     p_profile.set_defaults(func=cmd_profile)

@@ -22,6 +22,9 @@ SCHEMA = "setpoint/v1"
 DIGEST_HEADER = "header"
 DIGEST_CONTENT = "content"
 
+# Decimal places kept for a stored statistic. See spec section 7.
+STORED_DIGITS = 6
+
 
 class ProfileError(Exception):
     """A profile could not be read, or may not be written."""
@@ -38,11 +41,19 @@ class Objective(str, Enum):
 
 @dataclass(frozen=True)
 class Summary:
-    """One measured quantity as a profile stores it. Mean and stddev are not kept."""
+    """One measured quantity as a profile stores it. Mean and stddev are not kept.
+
+    Values are rounded on construction. Binary float noise in a file people are meant
+    to read and edit is noise, and no measurement justifies more digits than this.
+    """
 
     median: float
     iqr: float
     spread: float
+
+    def __post_init__(self) -> None:
+        for name in ("median", "iqr", "spread"):
+            object.__setattr__(self, name, round(float(getattr(self, name)), STORED_DIGITS))
 
     @classmethod
     def of(cls, statistic: Statistic) -> Summary | None:
