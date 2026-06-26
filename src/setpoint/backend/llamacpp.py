@@ -10,13 +10,22 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
 from pathlib import Path
 
 from ..measure import Statistic
-from .types import BackendBuild, BackendError, BenchRun, BenchSample, MeasurementKind, RunSpec
+from .types import (
+    BackendBuild,
+    BackendDevice,
+    BackendError,
+    BenchRun,
+    BenchSample,
+    MeasurementKind,
+    RunSpec,
+)
 
 BINARY_NAME = "llama-bench"
 
@@ -25,6 +34,15 @@ BINARY_ENV_VAR = "SETPOINT_LLAMA_BENCH"
 
 # A deep-context run repeats a long prefill several times, so the ceiling is generous.
 DEFAULT_TIMEOUT_S = 900.0
+
+# Listing devices loads every backend library but no model, so it is quick.
+PROBE_TIMEOUT_S = 30.0
+
+# "  Vulkan1: NVIDIA GeForce GTX 1650 (4176 MiB, 3581 MiB free)"
+_DEVICE_LINE = re.compile(
+    r"^ {2}(?P<id>\w+):\s+(?P<name>.+?)"
+    r"(?:\s+\((?P<total>\d+)\s*MiB(?:,\s*(?P<free>\d+)\s*MiB free)?\))?\s*$"
+)
 
 # Flash attention took 0|1 before it took on|off|auto. Builds older than this are not
 # driven; the flag is spelled the modern way.
@@ -99,6 +117,29 @@ class LlamaCppBackend:
             argv += ["-ot", override]
         return argv
 
+    def devices(self, timeout_s: float = PROBE_TIMEOUT_S) -> tuple[BackendDevice, ...]:
+        """Ask the backend what it can run on, without loading a model.
+
+        Which accelerator a run lands on is not a detail. An integrated GPU sitting
+        beside a discrete one will accept the work and return a number that says
+        nothing about the card the profile is filed under.
+        """
+        if self.binary is None:
+            raise BackendError(f"{BINARY_NAME} was not found")
+        try:
+            completed = subprocess.run(
+                [str(self.binary), "--list-devices"],
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+                check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            raise BackendError(f"{BINARY_NAME} could not list its devices: {exc}") from exc
+        if completed.returncode != 0:
+            raise BackendError(f"{BINARY_NAME} exited {completed.returncode} listing devices")
+        return parse_devices(f"{completed.stdout}\n{completed.stderr}")
+
     def run(self, spec: RunSpec, timeout_s: float = DEFAULT_TIMEOUT_S) -> BenchRun:
         """Measure one configuration. Raises `BackendError` if the run did not produce data."""
         argv = self.build_argv(spec)
@@ -163,6 +204,30 @@ def parse_output(
         duration_s=duration_s,
         notes=tuple(dict.fromkeys(notes)),
     )
+
+
+def parse_devices(text: str) -> tuple[BackendDevice, ...]:
+    """Read the device listing. Everything the backend prints before it is noise."""
+    devices: list[BackendDevice] = []
+    listing = False
+    for line in text.splitlines():
+        if not listing:
+            listing = line.strip().lower().startswith("available devices")
+            continue
+        match = _DEVICE_LINE.match(line.rstrip())
+        if match is None:
+            if line.strip():
+                break
+            continue
+        devices.append(
+            BackendDevice(
+                id=match["id"],
+                name=match["name"].strip(),
+                total_mib=int(match["total"]) if match["total"] else None,
+                free_mib=int(match["free"]) if match["free"] else None,
+            )
+        )
+    return tuple(devices)
 
 
 def _load_records(stdout: str) -> list[dict[str, object]]:

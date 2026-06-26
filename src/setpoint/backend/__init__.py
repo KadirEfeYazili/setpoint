@@ -6,9 +6,17 @@ would implement.
 
 from __future__ import annotations
 
-from .llamacpp import BINARY_ENV_VAR, BINARY_NAME, LlamaCppBackend, find_binary, parse_output
+from .llamacpp import (
+    BINARY_ENV_VAR,
+    BINARY_NAME,
+    LlamaCppBackend,
+    find_binary,
+    parse_devices,
+    parse_output,
+)
 from .types import (
     BackendBuild,
+    BackendDevice,
     BackendError,
     BenchRun,
     BenchSample,
@@ -20,6 +28,7 @@ __all__ = [
     "BINARY_ENV_VAR",
     "BINARY_NAME",
     "BackendBuild",
+    "BackendDevice",
     "BackendError",
     "BenchRun",
     "BenchSample",
@@ -27,5 +36,6 @@ __all__ = [
     "RunSpec",
     "MeasurementKind",
     "find_binary",
+    "parse_devices",
     "parse_output",
 ]
