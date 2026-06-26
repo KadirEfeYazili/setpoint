@@ -38,6 +38,10 @@ class RunSpec:
     `n_depth` is what makes the measurement honest about context: it pre-fills the KV
     cache, so the run allocates and traverses the cache the target context implies
     instead of measuring an empty one.
+
+    `devices` names the accelerators to run on. Leaving it empty lets the backend
+    choose, which on a laptop with an integrated GPU alongside a discrete one can
+    quietly measure the wrong card.
     """
 
     model_path: Path
@@ -53,6 +57,7 @@ class RunSpec:
     cache_type_v: str = "f16"
     flash_attn: bool | None = None
     main_gpu: int | None = None
+    devices: tuple[str, ...] = ()
     tensor_overrides: tuple[str, ...] = ()
     repetitions: int = 5
 
@@ -80,6 +85,21 @@ class BackendBuild:
         if self.accelerators:
             parts.append(f"({self.accelerators})")
         return " ".join(parts)
+
+
+@dataclass(frozen=True)
+class BackendDevice:
+    """One accelerator the backend can run on, named the way the backend names it."""
+
+    id: str
+    name: str
+    total_mib: int | None = None
+    free_mib: int | None = None
+
+    @property
+    def kind(self) -> str:
+        """`"Vulkan1"` -> `"Vulkan"`: which backend exposes this device."""
+        return self.id.rstrip("0123456789") or self.id
 
 
 @dataclass(frozen=True)
@@ -116,6 +136,7 @@ class BenchRun:
     samples: tuple[BenchSample, ...]
     gpu_info: str | None = None
     cpu_info: str | None = None
+    devices: str | None = None
     command: tuple[str, ...] = ()
     duration_s: float | None = None
     notes: tuple[str, ...] = field(default_factory=tuple)
@@ -151,6 +172,7 @@ class BenchRun:
             },
             "gpu_info": self.gpu_info,
             "cpu_info": self.cpu_info,
+            "devices": self.devices,
             "command": list(self.command),
             "duration_s": self.duration_s,
             "reliable": self.reliable,

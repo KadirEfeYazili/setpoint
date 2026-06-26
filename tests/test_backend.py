@@ -96,6 +96,17 @@ class TestCommandLine:
         assert argv.count("-ot") == 2
         assert "exps=CPU" in argv
 
+    def test_a_named_device_is_pinned(self, backend):
+        argv = backend.build_argv(spec(devices=("Vulkan1",)))
+        assert argv[argv.index("-dev") + 1] == "Vulkan1"
+
+    def test_several_devices_are_joined_the_way_the_backend_expects(self, backend):
+        argv = backend.build_argv(spec(devices=("CUDA0", "CUDA1")))
+        assert argv[argv.index("-dev") + 1] == "CUDA0/CUDA1"
+
+    def test_no_device_is_pinned_when_none_was_named(self, backend):
+        assert "-dev" not in backend.build_argv(spec())
+
     def test_cache_types_are_always_explicit(self, backend):
         argv = backend.build_argv(spec(cache_type_k="q8_0", cache_type_v="q8_0"))
         assert argv[argv.index("-ctk") + 1] == "q8_0"
@@ -138,6 +149,22 @@ class TestParsing:
         run = parse_output(json.dumps(records), spec())
         assert not run.reliable
         assert any("per-repetition" in note for note in run.notes)
+
+    def test_running_on_a_different_device_than_asked_for_is_flagged(self, output):
+        # A measurement filed under the wrong card is worse than no measurement.
+        records = json.loads(output)
+        for record in records:
+            record["devices"] = "Vulkan0"
+        run = parse_output(json.dumps(records), spec(devices=("Vulkan1",)))
+        assert any("may not describe the hardware" in note for note in run.notes)
+
+    def test_matching_devices_raise_no_complaint(self, output):
+        records = json.loads(output)
+        for record in records:
+            record["devices"] = "Vulkan1"
+        run = parse_output(json.dumps(records), spec(devices=("Vulkan1",)))
+        assert run.notes == ()
+        assert run.devices == "Vulkan1"
 
     def test_an_old_build_is_flagged(self, output):
         records = json.loads(output)

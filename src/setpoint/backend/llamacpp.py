@@ -93,6 +93,8 @@ class LlamaCppBackend:
             argv += ["-fa", "on" if spec.flash_attn else "off"]
         if spec.main_gpu is not None:
             argv += ["-mg", str(spec.main_gpu)]
+        if spec.devices:
+            argv += ["-dev", "/".join(spec.devices)]
         for override in spec.tensor_overrides:
             argv += ["-ot", override]
         return argv
@@ -138,6 +140,12 @@ def parse_output(
         number=_int(first, "build_number"),
         accelerators=_str(first, "backends"),
     )
+    used = _str(first, "devices")
+    if spec.devices and used and used != "/".join(spec.devices):
+        notes.append(
+            f"The run was asked for {'/'.join(spec.devices)} but reports {used}; the "
+            "measurement may not describe the hardware it is filed under."
+        )
     if build.number is not None and build.number < MIN_SUPPORTED_BUILD:
         notes.append(
             f"Build {build.number} is older than the versions setpoint drives; flag "
@@ -150,6 +158,7 @@ def parse_output(
         samples=samples,
         gpu_info=_str(first, "gpu_info"),
         cpu_info=_str(first, "cpu_info"),
+        devices=used,
         command=command,
         duration_s=duration_s,
         notes=tuple(dict.fromkeys(notes)),
