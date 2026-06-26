@@ -28,8 +28,13 @@ from .types import (
 # measurements were tight; otherwise their spread sets the bar.
 MIN_IMPROVEMENT = 0.02
 
-# Coordinate descent stops when a whole pass changes nothing, or at this many passes.
-MAX_PASSES = 4
+# Safety stop for coordinate descent, not a tuning knob: the descent ends when a full
+# sweep of the neighbourhood improves nothing. This only bounds a pathological landscape.
+MAX_MOVES = 32
+
+# The search is meant to take minutes. Past this many measurements it stops and reports
+# the best it has, rather than running all night.
+DEFAULT_MEASUREMENT_BUDGET = 60
 
 
 def is_improvement(current: Trial, candidate: Trial) -> bool:
@@ -79,8 +84,9 @@ def neighbours(config: Config, space: SearchSpace) -> list[tuple[str, Config]]:
 
     if space.tune_flash_attn and config.flash_attn is not None:
         flipped = not config.flash_attn
-        moves.append((f"flash attention {'on' if flipped else 'off'}",
-                      replace(config, flash_attn=flipped)))
+        moves.append(
+            (f"flash attention {'on' if flipped else 'off'}", replace(config, flash_attn=flipped))
+        )
 
     return moves
 
@@ -92,10 +98,11 @@ def search(
     screen_effort: Effort,
     full_effort: Effort,
     baseline: Config | None = None,
+    measurement_budget: int = DEFAULT_MEASUREMENT_BUDGET,
 ) -> SearchResult:
     """Run the whole search. Interrupting it returns the best result found so far."""
     steps: list[Step] = []
-    state = _State(measure=measure, steps=steps)
+    state = _State(measure=measure, steps=steps, budget=measurement_budget)
 
     if not seeds:
         return SearchResult(None, None, tuple(steps), 0, False, "no seed configurations")
@@ -108,21 +115,34 @@ def search(
         survivor = _screen(seeds, screen_effort, state)
         if survivor is None:
             return SearchResult(
-                None, baseline_trial, tuple(steps), state.count, False,
+                None,
+                baseline_trial,
+                tuple(steps),
+                state.count,
+                False,
                 "no seed configuration produced a measurement",
             )
 
         best = _descend(survivor, space, screen_effort, state)
-        confirmed = state.run(best.config, full_effort, Stage.CONFIRM)
+        confirmed = state.run(best.config, full_effort, Stage.CONFIRM, force=True)
         winner = confirmed if confirmed.usable else best
-        reason = "search finished" if confirmed.usable else "final measurement failed"
+        if not confirmed.usable:
+            reason = "the winning configuration failed its confirmation run"
+        elif state.exhausted:
+            reason = f"stopped after {state.count} measurements"
+        else:
+            reason = "search finished"
         return SearchResult(winner, baseline_trial, tuple(steps), state.count, False, reason)
 
     except KeyboardInterrupt:
         # Accepting the best result so far is the point of allowing the interrupt.
         best = state.best_so_far()
         return SearchResult(
-            best, state.baseline, tuple(steps), state.count, True,
+            best,
+            state.baseline,
+            tuple(steps),
+            state.count,
+            True,
             "interrupted; reporting the best configuration measured so far",
         )
 
@@ -148,10 +168,12 @@ def _screen(seeds: list[Config], effort: Effort, state: _State) -> Trial | None:
 def _descend(start: Trial, space: SearchSpace, effort: Effort, state: _State) -> Trial:
     """Shift one parameter at a time, keeping any move that beats the noise."""
     current = start
-    for _ in range(MAX_PASSES):
+    for _ in range(MAX_MOVES):
         improved = False
         for label, candidate_config in neighbours(current.config, space):
-            if state.already_tried(candidate_config):
+            if state.exhausted:
+                return current
+            if state.already_tried(candidate_config, effort):
                 continue
             candidate = state.run(candidate_config, effort, Stage.DESCEND, quiet=True)
             if is_improvement(current, candidate):
@@ -168,20 +190,35 @@ def _descend(start: Trial, space: SearchSpace, effort: Effort, state: _State) ->
 class _State:
     """Bookkeeping shared by the phases: the trace, the trial cache, the running best."""
 
-    def __init__(self, measure: Measure, steps: list[Step]) -> None:
+    def __init__(self, measure: Measure, steps: list[Step], budget: int) -> None:
         self._measure = measure
         self._steps = steps
-        self._seen: dict[Config, Trial] = {}
+        self._budget = budget
+        # Keyed by effort as well as configuration: the same settings measured briefly
+        # and measured properly are two different results, and only one may be reported.
+        self._seen: dict[tuple[Config, Effort], Trial] = {}
         self.count = 0
         self.baseline: Trial | None = None
 
-    def run(self, config: Config, effort: Effort, stage: Stage, quiet: bool = False) -> Trial:
-        cached = self._seen.get(config)
-        if cached is not None:
+    @property
+    def exhausted(self) -> bool:
+        return self.count >= self._budget
+
+    def run(
+        self,
+        config: Config,
+        effort: Effort,
+        stage: Stage,
+        quiet: bool = False,
+        force: bool = False,
+    ) -> Trial:
+        key = (config, effort)
+        cached = self._seen.get(key)
+        if cached is not None and not force:
             return cached
         trial = self._measure(config, effort)
         self.count += 1
-        self._seen[config] = trial
+        self._seen[key] = trial
         if stage is Stage.BASELINE:
             self.baseline = trial
         if not quiet:
@@ -189,8 +226,8 @@ class _State:
             self.note(stage, trial, verdict, trial.detail)
         return trial
 
-    def already_tried(self, config: Config) -> bool:
-        return config in self._seen
+    def already_tried(self, config: Config, effort: Effort) -> bool:
+        return (config, effort) in self._seen
 
     def note(self, stage: Stage, trial: Trial, verdict: Verdict, note: str = "") -> None:
         self._steps.append(Step(stage, trial.config, trial.score, verdict, note))

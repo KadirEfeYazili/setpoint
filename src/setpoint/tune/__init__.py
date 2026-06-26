@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from .search import MAX_PASSES, MIN_IMPROVEMENT, is_improvement, neighbours, search
+from .search import (
+    DEFAULT_MEASUREMENT_BUDGET,
+    MAX_MOVES,
+    MIN_IMPROVEMENT,
+    is_improvement,
+    neighbours,
+    search,
+)
 from .types import (
     Effort,
     Measure,
@@ -15,7 +22,8 @@ from .types import (
 )
 
 __all__ = [
-    "MAX_PASSES",
+    "DEFAULT_MEASUREMENT_BUDGET",
+    "MAX_MOVES",
     "MIN_IMPROVEMENT",
     "Effort",
     "Measure",
