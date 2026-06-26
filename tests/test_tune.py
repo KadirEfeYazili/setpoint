@@ -178,20 +178,22 @@ class TestSearch:
 class TestBaseline:
     def test_the_baseline_is_measured_at_full_effort_and_reported(self):
         landscape = Landscape()
-        result = search(
-            seeds(), SPACE, landscape, SCREEN, FULL, baseline=config(n_gpu_layers=37)
-        )
+        result = search(seeds(), SPACE, landscape, SCREEN, FULL, baseline=config(n_gpu_layers=37))
         assert result.baseline is not None
         assert (config(n_gpu_layers=37), FULL) in landscape.asked
         assert result.speedup > 1.0
 
     def test_losing_to_the_baseline_is_reported_not_hidden(self):
-        # The baseline sits on the peak, so the search cannot beat it.
-        result = search(
-            seeds((10, 12)), SPACE, Landscape(), SCREEN, FULL, baseline=config()
-        )
-        assert result.speedup is not None
-        assert result.speedup <= 1.0
+        # A flat landscape the tuner cannot climb, with a baseline that already wins.
+        winner = config(n_gpu_layers=30)
+
+        def flat(cfg: Config, effort: Effort) -> Trial:
+            score = 20.0 if cfg == winner else 10.0
+            return Trial(cfg, score=score, spread=0.005, reliable=True)
+
+        result = search(seeds((10, 12)), SPACE, flat, SCREEN, FULL, baseline=winner)
+        assert result.speedup == 0.5
+        assert "search finished" in result.reason
 
     def test_without_a_baseline_there_is_no_speedup_to_claim(self):
         assert search(seeds(), SPACE, Landscape(), SCREEN, FULL).speedup is None
