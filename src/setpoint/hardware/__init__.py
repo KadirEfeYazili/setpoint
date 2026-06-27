@@ -22,16 +22,20 @@ from .types import (
     HostInfo,
     ProbeStatus,
 )
+from .watch import DEFAULT_INTERVAL_S, GpuWatch, GpuWatcher
 from .wddm import match_adapter
 from .wddm import probe as probe_wddm
 
 __all__ = [
     "ACTIVE_THROTTLE_REASONS",
     "MIB",
+    "DEFAULT_INTERVAL_S",
     "AdapterMemory",
     "DriverInfo",
     "GpuSample",
     "GpuStatic",
+    "GpuWatch",
+    "GpuWatcher",
     "HardwareSnapshot",
     "HostInfo",
     "NvmlProbe",
