@@ -13,10 +13,19 @@ from pathlib import Path
 
 import pytest
 
-from setpoint.backend import BackendError, LlamaCppBackend, MeasurementKind, RunSpec, parse_output
+from setpoint.backend import (
+    BackendError,
+    LlamaCppBackend,
+    MeasurementKind,
+    RunSpec,
+    parse_devices,
+    parse_output,
+)
 from setpoint.backend.llamacpp import BINARY_ENV_VAR, find_binary
 
-FIXTURE = Path(__file__).parent / "fixtures" / "llama_bench_run.json"
+FIXTURES = Path(__file__).parent / "fixtures"
+FIXTURE = FIXTURES / "llama_bench_run.json"
+DEVICES = FIXTURES / "llama_bench_devices.txt"
 
 
 @pytest.fixture
@@ -224,3 +233,36 @@ class TestRun:
         self._stub(monkeypatch, raises=OSError("permission denied"))
         with pytest.raises(BackendError, match="could not be started"):
             backend.run(spec())
+
+
+class TestDeviceListing:
+    """Parsed from output a real llama-bench produced, not from a guess at its shape."""
+
+    @pytest.fixture
+    def listing(self) -> str:
+        return DEVICES.read_text(encoding="utf-8")
+
+    def test_both_accelerators_are_found(self, listing):
+        devices = parse_devices(listing)
+        assert [d.id for d in devices] == ["Vulkan0", "Vulkan1"]
+        assert devices[1].name == "NVIDIA GeForce GTX 1650"
+
+    def test_memory_is_read_where_the_backend_reports_it(self, listing):
+        discrete = parse_devices(listing)[1]
+        assert discrete.total_mib == 4176
+        assert discrete.free_mib == 3581
+
+    def test_the_backend_kind_comes_off_the_device_id(self, listing):
+        assert {d.kind for d in parse_devices(listing)} == {"Vulkan"}
+
+    def test_the_chatter_before_the_listing_is_ignored(self, listing):
+        # Every line before "Available devices:" mentions devices too.
+        assert len(parse_devices(listing)) == 2
+
+    def test_a_device_without_a_memory_report_still_parses(self):
+        devices = parse_devices("Available devices:\n  CPU: 12th Gen Intel Core i5\n")
+        assert devices[0].id == "CPU"
+        assert devices[0].total_mib is None
+
+    def test_output_without_a_listing_yields_nothing(self):
+        assert parse_devices("error: no backends loaded\n") == ()

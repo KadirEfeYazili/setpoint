@@ -1,0 +1,9 @@
+load_backend: loaded RPC backend from C:\llama\ggml-rpc.dll
+ggml_vulkan: Found 2 Vulkan devices:
+ggml_vulkan: 0 = Intel(R) Iris(R) Xe Graphics (Intel Corporation) | uma: 1 | fp16: 1 | bf16: 0 | fp4: 0 | warp size: 32 | shared memory: 32768 | int dot: 1 | matrix cores: none
+ggml_vulkan: 1 = NVIDIA GeForce GTX 1650 (NVIDIA) | uma: 0 | fp16: 1 | bf16: 0 | fp4: 0 | warp size: 32 | shared memory: 49152 | int dot: 1 | matrix cores: none
+load_backend: loaded Vulkan backend from C:\llama\ggml-vulkan.dll
+load_backend: loaded CPU backend from C:\llama\ggml-cpu-alderlake.dll
+Available devices:
+  Vulkan0: Intel(R) Iris(R) Xe Graphics (8064 MiB, 7404 MiB free)
+  Vulkan1: NVIDIA GeForce GTX 1650 (4176 MiB, 3581 MiB free)
