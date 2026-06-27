@@ -9,9 +9,12 @@ could not look, and a check that failed says how to fix it.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from setpoint import doctor
+from setpoint.backend import BackendDevice
 from setpoint.doctor.checks import ALL_CHECKS
 from setpoint.doctor.types import Outcome, Severity
 from setpoint.hardware.types import (
@@ -31,11 +34,23 @@ GPU_CHECK_PREFIXES = ("nvidia.", "driver.", "vram.", "gpu.")
 
 
 @pytest.fixture(autouse=True)
-def _no_backend_on_path(monkeypatch):
-    """Keep the backend check out of the matrix; it does not depend on the hardware."""
+def _no_backend_installed(monkeypatch):
+    """Keep the backend out of the matrix, and keep the checks from running a subprocess."""
     monkeypatch.delenv("SETPOINT_LLAMA_BENCH", raising=False)
     monkeypatch.setattr("setpoint.doctor.checks.find_binary", lambda *a, **k: None)
     monkeypatch.setattr("setpoint.doctor.checks.shutil.which", lambda _: None)
+    monkeypatch.setattr("setpoint.doctor.checks.backend_devices", lambda: None)
+
+
+def with_backend(monkeypatch, *devices: BackendDevice, path: str = "/opt/llama-bench") -> None:
+    """Pretend a backend is installed and offers these devices."""
+    monkeypatch.setattr("setpoint.doctor.checks.find_binary", lambda *a, **k: Path(path))
+    monkeypatch.setattr("setpoint.doctor.checks.backend_devices", lambda: devices or None)
+
+
+IGPU = BackendDevice("Vulkan0", "Intel(R) Iris(R) Xe Graphics", 8064, 7404)
+DGPU = BackendDevice("Vulkan1", "NVIDIA GeForce GTX 1650", 4176, 3581)
+CUDA = BackendDevice("CUDA0", "NVIDIA GeForce RTX 4090", 24564, 23000)
 
 
 def host(system: str = "Windows", ram: int | None = 16 * GIB) -> HostInfo:
@@ -199,3 +214,56 @@ class TestCheckContract:
         findings = check(machine())
         assert isinstance(findings, list)
         assert all(f.check_id for f in findings)
+
+
+class TestBackendChangesTheVerdict:
+    """A driver too old for CUDA prebuilts is only a fault if CUDA is what you run."""
+
+    def test_an_old_driver_with_a_vulkan_backend_is_not_a_fault(self, monkeypatch):
+        with_backend(monkeypatch, DGPU)
+        report = doctor.run(MATRIX["old driver, small card"])
+        cuda = next(f for f in report.findings if f.check_id == "driver.cuda-support")
+        assert cuda.outcome is Outcome.PASS
+        assert not [f for f in report.failures if f.severity is Severity.CRITICAL]
+
+    def test_an_old_driver_with_no_backend_stays_critical(self, monkeypatch):
+        report = doctor.run(MATRIX["old driver, small card"])
+        cuda = next(f for f in report.findings if f.check_id == "driver.cuda-support")
+        assert cuda.outcome is Outcome.FAIL
+        assert cuda.severity is Severity.CRITICAL
+
+    def test_a_cuda_only_backend_does_not_excuse_the_old_driver(self, monkeypatch):
+        # CUDA is exactly the thing the driver cannot run, so this is no reprieve.
+        with_backend(monkeypatch, CUDA)
+        report = doctor.run(MATRIX["old driver, small card"])
+        cuda = next(f for f in report.findings if f.check_id == "driver.cuda-support")
+        assert cuda.outcome is Outcome.FAIL
+
+
+class TestDeviceChoice:
+    def test_two_accelerators_are_flagged(self, monkeypatch):
+        with_backend(monkeypatch, IGPU, DGPU)
+        report = doctor.run(MATRIX["old driver, small card"])
+        choice = next(f for f in report.findings if f.check_id == "backend.device-choice")
+        assert choice.outcome is Outcome.FAIL
+        assert choice.severity is Severity.WARNING
+        assert "Iris" in choice.what and "GTX 1650" in choice.what
+        assert choice.fix
+
+    def test_one_accelerator_has_nothing_to_choose_wrongly(self, monkeypatch):
+        with_backend(monkeypatch, DGPU)
+        report = doctor.run(MATRIX["old driver, small card"])
+        choice = next(f for f in report.findings if f.check_id == "backend.device-choice")
+        assert choice.outcome is Outcome.PASS
+
+    def test_without_a_backend_there_is_no_device_finding_at_all(self):
+        ids = {f.check_id for f in doctor.run(MATRIX["old driver, small card"]).findings}
+        assert "backend.device-choice" not in ids
+
+    def test_a_backend_that_will_not_list_its_devices_is_not_an_error(self, monkeypatch):
+        monkeypatch.setattr("setpoint.doctor.checks.find_binary", lambda *a, **k: Path("x"))
+        monkeypatch.setattr("setpoint.doctor.checks.backend_devices", lambda: None)
+        report = doctor.run(MATRIX["old driver, small card"])
+        backend = next(f for f in report.findings if f.check_id == "backend.llama-cpp")
+        assert backend.outcome is Outcome.PASS
+        assert "could not be asked" in backend.what

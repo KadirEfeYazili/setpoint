@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import shutil
 
-from ..backend import BINARY_ENV_VAR, find_binary
+from ..backend import BINARY_ENV_VAR, BackendDevice, BackendError, LlamaCppBackend, find_binary
 from ..hardware import ACTIVE_THROTTLE_REASONS, MIB, HardwareSnapshot, ProbeStatus, match_adapter
 from .types import Finding, Outcome, Severity
 
@@ -111,6 +111,30 @@ def check_cuda_support(snap: HardwareSnapshot) -> list[Finding]:
     }
 
     if supported < MIN_CUDA_FOR_PREBUILT:
+        # A driver too old for CUDA prebuilts only matters if CUDA is what you run.
+        # With a working non-CUDA backend installed, this is history, not a fault.
+        installed = backend_devices()
+        kinds = sorted({d.kind for d in installed}) if installed else []
+        non_cuda = [k for k in kinds if k.lower() not in ("cuda", "cpu")]
+        evidence["backend_devices"] = kinds
+
+        if non_cuda:
+            return [
+                Finding(
+                    check_id="driver.cuda-support",
+                    title="CUDA runtime support",
+                    outcome=Outcome.PASS,
+                    severity=Severity.INFO,
+                    what=f"Driver {snap.driver.driver_version} is too old for prebuilt "
+                    f"CUDA {MIN_CUDA_FOR_PREBUILT[0]}.x binaries, but the installed "
+                    f"backend runs on {', '.join(non_cuda)} and does not need them.",
+                    why="Which backend a measurement came from is recorded in the "
+                    "profile signature, so a profile measured here stays honest about "
+                    "what produced it.",
+                    evidence=evidence,
+                )
+            ]
+
         return [
             Finding(
                 check_id="driver.cuda-support",
@@ -413,8 +437,19 @@ def check_pcie_link(snap: HardwareSnapshot) -> list[Finding]:
     ]
 
 
+def backend_devices() -> tuple[BackendDevice, ...] | None:
+    """What the installed backend can run on, or `None` if it could not be asked."""
+    backend = LlamaCppBackend()
+    if not backend.available:
+        return None
+    try:
+        return backend.devices()
+    except BackendError:
+        return None
+
+
 def check_backend(snap: HardwareSnapshot) -> list[Finding]:
-    """Is there a llama.cpp we can actually measure with?"""
+    """Is there a llama.cpp we can actually measure with, and on what?"""
     binaries = {name: shutil.which(name) for name in ("llama-bench", "llama-server", "llama-cli")}
     found = {k: v for k, v in binaries.items() if v}
     ollama = shutil.which("ollama")
@@ -424,16 +459,11 @@ def check_backend(snap: HardwareSnapshot) -> list[Finding]:
     evidence: dict[str, object] = {"llama_cpp": found, "ollama": ollama, "llama_bench": str(bench)}
 
     if bench is not None:
-        return [
-            Finding(
-                check_id="backend.llama-cpp",
-                title="llama.cpp backend",
-                outcome=Outcome.PASS,
-                severity=Severity.INFO,
-                what=f"llama-bench found at {bench}.",
-                evidence=evidence,
-            )
-        ]
+        devices = backend_devices()
+        findings = [_backend_present(bench, devices, evidence)]
+        if devices:
+            findings.extend(_device_choice(devices))
+        return findings
 
     what = "llama-bench was not found on PATH."
     if ollama:
@@ -452,6 +482,67 @@ def check_backend(snap: HardwareSnapshot) -> list[Finding]:
             f"point setpoint at one with {BINARY_ENV_VAR}: "
             "https://github.com/ggml-org/llama.cpp/releases",
             evidence=evidence,
+        )
+    ]
+
+
+def _backend_present(
+    bench: object, devices: tuple[BackendDevice, ...] | None, evidence: dict[str, object]
+) -> Finding:
+    what = f"llama-bench found at {bench}."
+    if devices:
+        kinds = sorted({d.kind for d in devices})
+        what += f" It offers {len(devices)} device(s) through {', '.join(kinds)}."
+        evidence["devices"] = [
+            {"id": d.id, "name": d.name, "total_mib": d.total_mib} for d in devices
+        ]
+    elif devices is None:
+        what += " It could not be asked which devices it offers."
+    return Finding(
+        check_id="backend.llama-cpp",
+        title="llama.cpp backend",
+        outcome=Outcome.PASS,
+        severity=Severity.INFO,
+        what=what,
+        evidence=evidence,
+    )
+
+
+def _device_choice(devices: tuple[BackendDevice, ...]) -> list[Finding]:
+    """More than one accelerator means the backend has to choose, and it may choose badly.
+
+    An integrated GPU accepts the work and returns a number. That number describes the
+    integrated GPU, whatever the profile says it describes.
+    """
+    if len(devices) < 2:
+        return [
+            Finding(
+                check_id="backend.device-choice",
+                title="Accelerator selection",
+                outcome=Outcome.PASS,
+                severity=Severity.INFO,
+                what=f"Only one accelerator is available ({devices[0].name}), "
+                "so there is nothing to choose wrongly.",
+                evidence={"devices": [d.id for d in devices]},
+            )
+        ]
+
+    listed = ", ".join(f"{d.id} {d.name} ({d.total_mib} MiB)" for d in devices)
+    return [
+        Finding(
+            check_id="backend.device-choice",
+            title="Accelerator selection",
+            outcome=Outcome.FAIL,
+            severity=Severity.WARNING,
+            what=f"The backend offers {len(devices)} accelerators: {listed}.",
+            why="A run that does not name one lets the backend pick, and an integrated "
+            "GPU will accept the work and report a throughput that describes itself "
+            "rather than the card you meant to measure.",
+            fix="setpoint names the device on every run it makes. When you invoke "
+            "llama.cpp yourself, pass -dev explicitly.",
+            evidence={
+                "devices": [{"id": d.id, "name": d.name, "total_mib": d.total_mib} for d in devices]
+            },
         )
     ]
 
