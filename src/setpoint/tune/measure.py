@@ -77,6 +77,7 @@ class BackendMeasure:
             reliable=run.reliable and not watch.throttled and score is not None,
             detail=" ".join(notes),
             run=run,
+            watch=watch,
         )
 
     def score(

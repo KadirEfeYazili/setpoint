@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from ..backend import BenchRun
+from ..hardware import GpuWatch
 from ..profile import Config
 
 
@@ -72,10 +73,19 @@ class Trial:
     reliable: bool = False
     detail: str = ""
     run: BenchRun | None = None
+    watch: GpuWatch | None = None
 
     @property
     def usable(self) -> bool:
         return self.score is not None
+
+    @property
+    def peak_vram_mib(self) -> int | None:
+        return self.watch.peak_vram_mib if self.watch else None
+
+    @property
+    def average_power_w(self) -> float | None:
+        return self.watch.average_power_w if self.watch else None
 
 
 @dataclass(frozen=True)
