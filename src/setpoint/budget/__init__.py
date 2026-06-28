@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from .kv import CACHE_TYPES
 from .kv import estimate as estimate_kv
+from .overhead import (
+    CALIBRATION,
+    DEFAULT_UBATCH,
+    RuntimeAllowance,
+    runtime_allowance,
+)
 from .planner import fit, max_context, plan, seed_candidates
 from .types import (
     GIB,
@@ -24,8 +30,10 @@ from .vram import (
 
 __all__ = [
     "CACHE_TYPES",
+    "CALIBRATION",
     "DEFAULT_FRAGMENTATION_PCT",
     "DEFAULT_RUNTIME_ALLOWANCE_BYTES",
+    "DEFAULT_UBATCH",
     "GIB",
     "MIB",
     "Alternative",
@@ -33,6 +41,7 @@ __all__ = [
     "Candidate",
     "KvEstimate",
     "OffloadPlan",
+    "RuntimeAllowance",
     "VramBudget",
     "assumed",
     "estimate_kv",
@@ -40,5 +49,6 @@ __all__ = [
     "from_snapshot",
     "max_context",
     "plan",
+    "runtime_allowance",
     "seed_candidates",
 ]

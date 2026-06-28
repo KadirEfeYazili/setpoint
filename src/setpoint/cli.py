@@ -160,7 +160,9 @@ def _row(style: Style, label: str, value: str, comment: str = "") -> None:
     print(f"{line}   {style.dim(comment)}" if comment else line)
 
 
-def _render_budget(plan: budget.BudgetPlan, reference: str, style: Style) -> None:
+def _render_budget(
+    plan: budget.BudgetPlan, reference: str, style: Style, allowance_note: str | None = None
+) -> None:
     model, vram, offload = plan.model, plan.vram, plan.offload
     width = term_width()
 
@@ -194,7 +196,7 @@ def _render_budget(plan: budget.BudgetPlan, reference: str, style: Style) -> Non
         style,
         "runtime allowance",
         "-" + gib(vram.runtime_allowance_bytes),
-        "estimate; `setpoint tune` measures it",
+        allowance_note or "",
     )
     _row(style, "safe ceiling", gib(vram.ceiling_bytes))
     if vram.detail:
@@ -253,11 +255,12 @@ def cmd_budget(args: argparse.Namespace) -> int:
         print(f"setpoint: cannot read {args.model}: {exc}", file=sys.stderr)
         return EXIT_ERROR
 
-    allowance = (
-        budget.DEFAULT_RUNTIME_ALLOWANCE_BYTES
-        if args.overhead is None
-        else args.overhead * budget.MIB
-    )
+    if args.overhead is None:
+        estimated = budget.runtime_allowance(model, args.ubatch)
+        allowance, allowance_note = estimated.total_bytes, estimated.detail
+    else:
+        allowance = args.overhead * budget.MIB
+        allowance_note = "your value"
     ram: int | None = None
     if args.vram is not None:
         vram = budget.assumed(
@@ -285,11 +288,12 @@ def cmd_budget(args: argparse.Namespace) -> int:
             return EXIT_ERROR
 
     plan = budget.plan(model, args.context, vram, args.kv_type, args.kv_type, host_ram_bytes=ram)
+    plan_note = allowance_note
 
     if args.json:
         print(json.dumps(plan.to_dict(), indent=2))
     else:
-        _render_budget(plan, resolved.reference, Style(color_enabled()))
+        _render_budget(plan, resolved.reference, Style(color_enabled()), plan_note)
     return EXIT_OK if plan.offload.fits_fully else EXIT_PROBLEM
 
 
@@ -448,11 +452,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--reserve", type=int, default=0, metavar="MB", help="VRAM to keep free for yourself"
     )
     p_budget.add_argument(
+        "--ubatch",
+        type=int,
+        default=budget.DEFAULT_UBATCH,
+        metavar="N",
+        help="microbatch the plan assumes; it sets the size of the compute buffers",
+    )
+    p_budget.add_argument(
         "--overhead",
         type=int,
         metavar="MB",
-        help="allowance for the driver context and compute buffers of the process that "
-        "does not exist yet (default 192)",
+        help="override the calculated allowance for the buffers of the process that "
+        "does not exist yet",
     )
     p_budget.add_argument(
         "--fragmentation",
