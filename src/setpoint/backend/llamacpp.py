@@ -206,6 +206,27 @@ def parse_output(
     )
 
 
+def select_device(devices: tuple[BackendDevice, ...], prefer: str | None) -> BackendDevice | None:
+    """Resolve a device preference against what the backend offers right now.
+
+    Device ids are positional and are not stable: a reboot can renumber them, so an id
+    written down earlier may name different hardware today. Matching on the name is what
+    keeps a measurement attached to the card it claims to describe.
+    """
+    if not devices:
+        return None
+    if not prefer:
+        return devices[0]
+    for device in devices:
+        if device.id.lower() == prefer.lower():
+            return device
+    needle = prefer.lower()
+    for device in devices:
+        if needle in device.name.lower() or device.name.lower() in needle:
+            return device
+    return None
+
+
 def parse_devices(text: str) -> tuple[BackendDevice, ...]:
     """Read the device listing. Everything the backend prints before it is noise."""
     devices: list[BackendDevice] = []

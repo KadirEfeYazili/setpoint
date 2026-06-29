@@ -13,6 +13,7 @@ from .llamacpp import (
     find_binary,
     parse_devices,
     parse_output,
+    select_device,
 )
 from .types import (
     BackendBuild,
@@ -38,4 +39,5 @@ __all__ = [
     "find_binary",
     "parse_devices",
     "parse_output",
+    "select_device",
 ]
