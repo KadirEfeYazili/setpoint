@@ -66,9 +66,11 @@ def fit(model: ModelInfo, estimate: KvEstimate | None, ceiling_bytes: int) -> Of
 
     used = 0
     placed = 0
+    next_block = None
     for index in reversed(range(model.block_count)):
         cost = weights.block_bytes[index] + kv_bytes[index]
         if used + cost > ceiling_bytes:
+            next_block = cost
             break
         used += cost
         placed += 1
@@ -90,6 +92,7 @@ def fit(model: ModelInfo, estimate: KvEstimate | None, ceiling_bytes: int) -> Of
         cpu_bytes=total - gpu_weights - gpu_kv,
         weights_on_gpu_bytes=gpu_weights,
         kv_on_gpu_bytes=gpu_kv,
+        next_block_bytes=next_block,
     )
 
 

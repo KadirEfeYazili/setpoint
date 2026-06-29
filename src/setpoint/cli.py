@@ -188,7 +188,7 @@ def _render_budget(
     title = f"vram  {vram.gpu_name}" if vram.gpu_name else "vram"
     print(style.bold(f"\n{title}"))
     _row(style, "total", gib(vram.total_bytes))
-    _row(style, "free", gib(vram.free_bytes), "measured" if vram.measured else "assumed")
+    _row(style, "free", gib(vram.free_bytes), "measured now" if vram.measured else "assumed")
     _row(style, "fragmentation", "-" + gib(vram.fragmentation_bytes))
     if vram.reserve_bytes:
         _row(style, "your reserve", "-" + gib(vram.reserve_bytes))
@@ -223,6 +223,14 @@ def _render_budget(
         gib(offload.gpu_bytes),
         f"weights {gib(offload.weights_on_gpu_bytes)} + cache {gib(offload.kv_on_gpu_bytes)}",
     )
+    if offload.next_block_bytes:
+        _row(
+            style,
+            "next block needs",
+            gib(offload.next_block_bytes),
+            "desktop usage drifting by this much moves the plan",
+        )
+
     left_behind = (
         "the token embedding, which llama.cpp keeps in RAM"
         if offload.fits_fully

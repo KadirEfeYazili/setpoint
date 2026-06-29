@@ -22,6 +22,10 @@ from .types import Effort, Trial
 SETTLE_TIMEOUT_S = 30.0
 SETTLE_POLL_S = 2.0
 
+# Free VRAM moving by this much between the plan and the run is worth saying out loud:
+# on a small card it is the difference of a layer or two.
+DRIFT_NOTICE_BYTES = 64 * 1024 * 1024
+
 
 @dataclass
 class BackendMeasure:
@@ -29,6 +33,10 @@ class BackendMeasure:
 
     `vram_ceiling_bytes` only means anything for the headroom objective, where staying
     inside the budget is the point rather than a nice-to-have.
+
+    `expected_free_bytes` is what the plan was computed against. Free VRAM moves while
+    a desktop runs, and a plan drawn against a quiet card can fail on a busy one, so
+    every run says how far the card had drifted since.
     """
 
     backend: LlamaCppBackend
@@ -37,6 +45,7 @@ class BackendMeasure:
     devices: tuple[str, ...] = ()
     gpu_index: int | None = None
     vram_ceiling_bytes: int | None = None
+    expected_free_bytes: int | None = None
     wait_for_throttle: bool = True
     timeout_s: float | None = None
     runs: list[BenchRun] = field(default_factory=list)
@@ -45,6 +54,7 @@ class BackendMeasure:
         before = wait_until_settled(
             self.gpu_index, timeout_s=SETTLE_TIMEOUT_S if self.wait_for_throttle else 0.0
         )
+        drift = self.drift()
         spec = run_spec(config, effort, self.model_path, self.devices)
 
         watcher = GpuWatcher(self.gpu_index)
@@ -64,6 +74,8 @@ class BackendMeasure:
             notes.append(f"The card throttled during the run: {', '.join(watch.throttle_reasons)}.")
         if watch.detail:
             notes.append(watch.detail)
+        if drift:
+            notes.append(drift)
 
         score, refusal = self.score(run, watch.peak_vram_bytes, watch.average_power_w)
         if refusal:
@@ -78,6 +90,22 @@ class BackendMeasure:
             detail=" ".join(notes),
             run=run,
             watch=watch,
+        )
+
+    def drift(self) -> str | None:
+        """How far free VRAM has moved since the plan was drawn, when it matters."""
+        if self.expected_free_bytes is None:
+            return None
+        now = free_vram(self.gpu_index)
+        if now is None:
+            return "free VRAM could not be re-read, so drift since the plan is unknown."
+        moved = self.expected_free_bytes - now
+        if abs(moved) < DRIFT_NOTICE_BYTES:
+            return None
+        direction = "less" if moved > 0 else "more"
+        return (
+            f"The card has {abs(moved) / (1024 * 1024):.0f} MiB {direction} free than when "
+            "the plan was drawn."
         )
 
     def score(
@@ -143,6 +171,20 @@ def read_throttle(gpu_index: int | None = None) -> tuple[str, ...]:
     except Exception:
         return ()
     return ()
+
+
+def free_vram(gpu_index: int | None = None) -> int | None:
+    """Free VRAM right now, or `None` if it could not be read."""
+    try:
+        with NvmlProbe() as probe:
+            if not probe.ok:
+                return None
+            for sample in probe.sample():
+                if gpu_index is None or sample.index == gpu_index:
+                    return sample.vram_free_bytes
+    except Exception:
+        return None
+    return None
 
 
 def wait_until_settled(

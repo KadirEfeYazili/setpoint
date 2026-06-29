@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from .measure import (
+    DRIFT_NOTICE_BYTES,
     SETTLE_TIMEOUT_S,
     BackendMeasure,
+    free_vram,
     read_throttle,
     run_spec,
     wait_until_settled,
@@ -31,6 +33,7 @@ from .types import (
 __all__ = [
     "DEFAULT_MEASUREMENT_BUDGET",
     "MAX_MOVES",
+    "DRIFT_NOTICE_BYTES",
     "SETTLE_TIMEOUT_S",
     "BackendMeasure",
     "MIN_IMPROVEMENT",
@@ -42,6 +45,7 @@ __all__ = [
     "Step",
     "Trial",
     "Verdict",
+    "free_vram",
     "is_improvement",
     "neighbours",
     "read_throttle",

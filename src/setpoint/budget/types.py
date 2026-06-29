@@ -71,6 +71,8 @@ class OffloadPlan:
     cpu_bytes: int
     weights_on_gpu_bytes: int
     kv_on_gpu_bytes: int
+    next_block_bytes: int | None = None
+    """What the next block would have needed. Also what a drift of that size costs."""
 
     @property
     def blocks_on_gpu(self) -> int:
@@ -168,6 +170,7 @@ class BudgetPlan:
                 "cpu_bytes": offload.cpu_bytes,
                 "weights_on_gpu_bytes": offload.weights_on_gpu_bytes,
                 "kv_on_gpu_bytes": offload.kv_on_gpu_bytes,
+                "next_block_bytes": offload.next_block_bytes,
                 "fits_fully": offload.fits_fully,
             },
             "alternatives": [
