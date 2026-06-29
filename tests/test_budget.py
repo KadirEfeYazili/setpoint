@@ -180,6 +180,14 @@ class TestFit:
         assert placed.n_gpu_layers == 4
         assert not placed.output_on_gpu
 
+    def test_the_cost_of_the_next_block_is_reported(self):
+        # It is also how much desktop drift the plan can absorb before it is wrong.
+        placed = planner.fit(model(), None, ceiling_bytes=250 * MIB)
+        assert placed.next_block_bytes == 100 * MIB
+
+    def test_a_plan_that_fits_has_no_next_block(self):
+        assert planner.fit(model(), None, ceiling_bytes=10 * GIB).next_block_bytes is None
+
     def test_nothing_fits_under_a_zero_ceiling(self):
         placed = planner.fit(model(), None, ceiling_bytes=0)
         assert placed.n_gpu_layers == 0

@@ -199,3 +199,34 @@ class TestFailures:
         )
         trial = BackendMeasure(backend=FakeBackend(noted), model_path=MODEL)(Config(), EFFORT)
         assert "device mismatch" in trial.detail
+
+
+class TestFreeMemoryDrift:
+    """Free VRAM moves while a desktop runs, and a plan drawn on a quiet card can fail."""
+
+    def _with_free(self, monkeypatch, free_bytes: int | None) -> None:
+        monkeypatch.setattr("setpoint.tune.measure.free_vram", lambda *a, **k: free_bytes)
+
+    def test_a_material_drop_since_the_plan_is_reported(self, monkeypatch):
+        self._with_free(monkeypatch, 3000 * MIB)
+        trial = measurer(expected_free_bytes=3500 * MIB)(Config(), EFFORT)
+        assert "500 MiB less free" in trial.detail
+
+    def test_extra_room_is_reported_too(self, monkeypatch):
+        self._with_free(monkeypatch, 3800 * MIB)
+        trial = measurer(expected_free_bytes=3500 * MIB)(Config(), EFFORT)
+        assert "300 MiB more free" in trial.detail
+
+    def test_a_small_wobble_is_not_worth_mentioning(self, monkeypatch):
+        self._with_free(monkeypatch, 3500 * MIB - 8 * MIB)
+        trial = measurer(expected_free_bytes=3500 * MIB)(Config(), EFFORT)
+        assert "free than" not in trial.detail
+
+    def test_an_unreadable_reading_says_the_drift_is_unknown(self, monkeypatch):
+        self._with_free(monkeypatch, None)
+        trial = measurer(expected_free_bytes=3500 * MIB)(Config(), EFFORT)
+        assert "drift since the plan is unknown" in trial.detail
+
+    def test_without_an_expectation_nothing_is_checked(self, monkeypatch):
+        self._with_free(monkeypatch, 1)
+        assert "free" not in measurer()(Config(), EFFORT).detail
