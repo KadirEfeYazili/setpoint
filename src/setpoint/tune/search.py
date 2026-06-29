@@ -10,6 +10,7 @@ whatever it had found.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 
 from ..profile import Config
@@ -99,10 +100,15 @@ def search(
     full_effort: Effort,
     baseline: Config | None = None,
     measurement_budget: int = DEFAULT_MEASUREMENT_BUDGET,
+    on_step: Callable[[Step], None] | None = None,
 ) -> SearchResult:
-    """Run the whole search. Interrupting it returns the best result found so far."""
+    """Run the whole search. Interrupting it returns the best result found so far.
+
+    `on_step` sees each decision as it is made. A search takes minutes, and a caller
+    that cannot show progress leaves the user watching a blank terminal.
+    """
     steps: list[Step] = []
-    state = _State(measure=measure, steps=steps, budget=measurement_budget)
+    state = _State(measure=measure, steps=steps, budget=measurement_budget, on_step=on_step)
 
     if not seeds:
         return SearchResult(None, None, tuple(steps), 0, False, "no seed configurations")
@@ -190,10 +196,17 @@ def _descend(start: Trial, space: SearchSpace, effort: Effort, state: _State) ->
 class _State:
     """Bookkeeping shared by the phases: the trace, the trial cache, the running best."""
 
-    def __init__(self, measure: Measure, steps: list[Step], budget: int) -> None:
+    def __init__(
+        self,
+        measure: Measure,
+        steps: list[Step],
+        budget: int,
+        on_step: Callable[[Step], None] | None = None,
+    ) -> None:
         self._measure = measure
         self._steps = steps
         self._budget = budget
+        self._on_step = on_step
         # Keyed by effort as well as configuration: the same settings measured briefly
         # and measured properly are two different results, and only one may be reported.
         self._seen: dict[tuple[Config, Effort], Trial] = {}
@@ -230,7 +243,10 @@ class _State:
         return (config, effort) in self._seen
 
     def note(self, stage: Stage, trial: Trial, verdict: Verdict, note: str = "") -> None:
-        self._steps.append(Step(stage, trial.config, trial.score, verdict, note))
+        step = Step(stage, trial.config, trial.score, verdict, note)
+        self._steps.append(step)
+        if self._on_step is not None:
+            self._on_step(step)
 
     def best_so_far(self) -> Trial | None:
         usable = [t for t in self._seen.values() if t.usable and t is not self.baseline]
