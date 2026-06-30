@@ -13,8 +13,16 @@ import json
 import sys
 from typing import Any
 
-from . import __version__, budget, doctor
+from . import __version__, budget, doctor, tune
 from . import profile as profiles
+from .backend import (
+    BINARY_ENV_VAR,
+    BINARY_NAME,
+    BackendError,
+    LlamaCppBackend,
+    MeasurementKind,
+    select_device,
+)
 from .hardware import probe as probe_hardware
 from .model import ModelError, analyze, resolve
 from .render import Style, color_enabled, gib, human_bytes, short_path, term_width, wrap
@@ -424,6 +432,251 @@ def cmd_profile(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _tune_effort(context: int, repetitions: int, label: str) -> tune.Effort:
+    return tune.Effort(repetitions=repetitions, n_depth=context, label=label)
+
+
+def _search_space(model: object, threads: int) -> tune.SearchSpace:
+    return tune.SearchSpace(
+        max_gpu_layers=model.block_count + 1,
+        max_threads=max(1, threads),
+        moe=model.is_moe,
+    )
+
+
+def _step_line(step: tune.Step, style: Style) -> str:
+    score = f"{step.score:8.2f}" if step.score is not None else "       -"
+    colour = {
+        tune.Verdict.IMPROVED: style.green,
+        tune.Verdict.DROPPED: style.grey,
+        tune.Verdict.FAILED: style.red,
+    }.get(step.verdict, style.dim)
+    layers = step.config.n_gpu_layers
+    where = f"-ngl {layers}" if layers is not None else "auto"
+    note = f"  {step.note}" if step.note else ""
+    return (
+        f"  {step.stage.value:<9}{where:<10}{score} "
+        f"{colour(step.verdict.value):<20}{style.dim(note)}"
+    )
+
+
+def _profile_from(
+    result: tune.SearchResult,
+    model: object,
+    snapshot: object,
+    target: profiles.Target,
+    gpu_index: int | None,
+) -> profiles.Profile | None:
+    """Turn a finished search into a profile, or nothing if it cannot back one."""
+    best, baseline = result.best, result.baseline
+    if best is None or best.run is None or baseline is None or baseline.score is None:
+        return None
+
+    decode = best.run.sample_of(MeasurementKind.DECODE)
+    prefill = best.run.sample_of(MeasurementKind.PREFILL)
+    if decode is None:
+        return None
+
+    measurement = profiles.Measurement.from_statistics(
+        decode=decode.throughput,
+        measured_at=profiles.now(),
+        prefill=prefill.throughput if prefill else None,
+        peak_vram_mb=best.peak_vram_mib,
+        avg_watt=best.average_power_w,
+    )
+    signature = profiles.build_signature(model, snapshot, best.run.build, gpu_index)
+    return profiles.Profile(
+        signature=signature,
+        model=profiles.ModelRef(model.name, model.architecture, model.file_type, str(model.path)),
+        target=target,
+        config=best.config,
+        measurement=measurement,
+        baseline=profiles.Baseline(
+            label="llama.cpp default (-ngl 99)",
+            config=baseline.config,
+            decode_tok_s=baseline.score,
+            speedup=result.speedup or 0.0,
+        ),
+        created=profiles.now(),
+        notes=tuple(n for n in (result.reason, best.detail) if n),
+    )
+
+
+def _same_card(device_name: str, gpu_name: str) -> bool:
+    """Whether a backend device and an NVML GPU are the same piece of hardware."""
+    a, b = device_name.lower(), gpu_name.lower()
+    return a in b or b in a
+
+
+def cmd_tune(args: argparse.Namespace) -> int:
+    style = Style(color_enabled())
+    try:
+        resolved = resolve(args.model)
+        model = analyze(resolved.path)
+    except ModelError as exc:
+        print(f"setpoint: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    backend = LlamaCppBackend()
+    if not backend.available:
+        print(
+            f"setpoint: {BINARY_NAME} was not found. Put it on PATH or set {BINARY_ENV_VAR}.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+
+    snapshot = probe_hardware(include_wddm=False)
+    allowance = budget.runtime_allowance(model, args.ubatch)
+    vram = budget.from_snapshot(
+        snapshot,
+        gpu_index=args.gpu,
+        reserve_bytes=args.reserve * budget.MIB,
+        runtime_allowance_bytes=allowance.total_bytes,
+    )
+    if vram is None:
+        print("setpoint: no NVIDIA GPU was found to tune against.", file=sys.stderr)
+        return EXIT_ERROR
+
+    plan = budget.plan(model, args.context, vram, args.kv_type, args.kv_type)
+
+    # Device ids are renumbered across reboots, so the one to use is resolved now and
+    # checked against the card the profile will be filed under.
+    try:
+        listing = backend.devices()
+    except BackendError as exc:
+        print(f"setpoint: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    wanted = args.device or vram.gpu_name
+    chosen = select_device(listing, wanted)
+    if chosen is None:
+        offered = ", ".join(f"{d.id} ({d.name})" for d in listing) or "nothing"
+        print(f"setpoint: no accelerator matches {wanted!r}. Offered: {offered}", file=sys.stderr)
+        return EXIT_ERROR
+    devices = (chosen.id,)
+    wrong_card = bool(vram.gpu_name) and not _same_card(chosen.name, vram.gpu_name)
+
+    print(style.bold("model"))
+    print(f"  {resolved.reference}   {style.dim(model.architecture + ' ' + model.parameter_label)}")
+    print(style.bold("\nplan"))
+    print(f"  seeded from the budget: -ngl {plan.offload.n_gpu_layers} of {model.block_count}")
+    print(f"  target {args.context} tokens, optimising for {args.optimize}")
+    print(f"  measuring on {chosen.id} -- {chosen.name}")
+    if wrong_card:
+        print(
+            style.yellow(f"  that is not {vram.gpu_name}, so this run cannot back a profile for it")
+        )
+
+    seeds = [
+        profiles.Config(
+            n_gpu_layers=candidate.n_gpu_layers,
+            cache_type_k=candidate.cache_type_k,
+            cache_type_v=candidate.cache_type_v,
+            flash_attn=candidate.flash_attn,
+            ubatch_size=args.ubatch,
+        )
+        for candidate in plan.candidates
+    ]
+    baseline = profiles.Config(
+        n_gpu_layers=99,
+        cache_type_k=args.kv_type,
+        cache_type_v=args.kv_type,
+        flash_attn=True,
+        ubatch_size=args.ubatch,
+    )
+
+    measure = tune.BackendMeasure(
+        backend=backend,
+        model_path=model.path,
+        objective=profiles.Objective(args.optimize),
+        devices=devices,
+        gpu_index=vram.gpu_index,
+        vram_ceiling_bytes=vram.ceiling_bytes,
+        expected_free_bytes=vram.free_bytes,
+    )
+
+    print(style.bold("\nsearch"))
+    print(style.dim("  interrupt with Ctrl-C to keep the best result so far"))
+    result = tune.search(
+        seeds=seeds,
+        space=_search_space(model, snapshot.host.cpu_count or 8),
+        measure=measure,
+        screen_effort=_tune_effort(min(args.context, args.screen_context), 2, "screen"),
+        full_effort=_tune_effort(args.context, args.repetitions, "full"),
+        baseline=baseline,
+        measurement_budget=args.budget,
+        on_step=lambda step: print(_step_line(step, style)),
+    )
+
+    target = profiles.Target(context=args.context, optimize=profiles.Objective(args.optimize))
+    profile = _profile_from(result, model, snapshot, target, vram.gpu_index)
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "reason": result.reason,
+                    "interrupted": result.interrupted,
+                    "measurements": result.measurements,
+                    "speedup": result.speedup,
+                    "profile": profiles.to_mapping(profile) if profile else None,
+                },
+                indent=2,
+            )
+        )
+    else:
+        _render_tune_result(result, profile, style)
+
+    if wrong_card:
+        print(
+            style.yellow(
+                f"\nnot written: measured on {chosen.name}, but the profile would "
+                f"claim {vram.gpu_name}"
+            )
+        )
+        return EXIT_PROBLEM
+    if profile is None:
+        return EXIT_PROBLEM
+    if not profile.writable:
+        print(style.yellow(f"\nnot written: {profile.why_not_writable()}"))
+        return EXIT_PROBLEM
+    if args.dry_run:
+        print(style.dim("\ndry run: nothing was written"))
+        return EXIT_OK
+    path = profiles.save(profile)
+    print(f"\nwritten to {short_path(path)}")
+    return EXIT_OK
+
+
+def _render_tune_result(
+    result: tune.SearchResult, profile: profiles.Profile | None, style: Style
+) -> None:
+    print(style.bold("\nresult"))
+    print(f"  {result.measurements} measurements, {result.reason}")
+    if result.best is None:
+        print(style.red("  nothing measurable was found"))
+        return
+
+    for label, value in _config_rows(result.best.config):
+        _row(style, label, value)
+    if result.best.score is not None:
+        _row(style, "score", f"{result.best.score:.2f}", f"spread {result.best.spread or 0:.1%}")
+    if result.best.peak_vram_mib:
+        _row(style, "peak vram", f"{result.best.peak_vram_mib} MiB")
+
+    if result.baseline and result.baseline.score:
+        speedup = result.speedup or 0.0
+        painted = style.green(f"{speedup:.2f}x") if speedup > 1 else style.yellow(f"{speedup:.2f}x")
+        print()
+        _row(style, "baseline (-ngl 99)", f"{result.baseline.score:.2f}")
+        verdict = "" if speedup > 1 else "  no better than the default"
+        _row(style, "speedup", "", painted + verdict)
+
+    if result.best.detail:
+        print()
+        for line in wrap(f"note: {result.best.detail}", term_width() - 2):
+            print(style.grey(f"  {line}"))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="setpoint",
@@ -488,6 +741,62 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_budget.add_argument("--json", action="store_true", help="emit machine-readable output")
     p_budget.set_defaults(func=cmd_budget)
+
+    p_tune = sub.add_parser(
+        "tune",
+        help="measure configurations and write the best one as a profile",
+        description=(
+            "Seeds a search from the budget, screens the candidates cheaply, then walks "
+            "one parameter at a time. Interrupting with Ctrl-C keeps the best result "
+            "measured so far. A result whose spread is too wide is not written."
+        ),
+    )
+    p_tune.add_argument("model", help="path to a .gguf file, or an Ollama model name")
+    p_tune.add_argument(
+        "-c", "--context", type=int, default=4096, help="target context length in tokens"
+    )
+    p_tune.add_argument(
+        "--optimize",
+        default="speed",
+        choices=[o.value for o in profiles.Objective],
+        help="what to maximise",
+    )
+    p_tune.add_argument(
+        "--device",
+        metavar="NAME",
+        help="accelerator to measure on, by name or by the id the backend currently "
+        "gives it; defaults to the GPU being budgeted for",
+    )
+    p_tune.add_argument("--gpu", type=int, help="GPU index, when the machine has more than one")
+    p_tune.add_argument(
+        "--kv-type", default="f16", choices=sorted(budget.CACHE_TYPES), help="KV cache quantization"
+    )
+    p_tune.add_argument(
+        "--ubatch", type=int, default=budget.DEFAULT_UBATCH, metavar="N", help="microbatch size"
+    )
+    p_tune.add_argument(
+        "--reserve", type=int, default=0, metavar="MB", help="VRAM to keep free for yourself"
+    )
+    p_tune.add_argument(
+        "--repetitions", type=int, default=5, metavar="N", help="runs per final measurement"
+    )
+    p_tune.add_argument(
+        "--screen-context",
+        type=int,
+        default=1024,
+        metavar="N",
+        help="context used while screening candidates, which keeps early rounds cheap",
+    )
+    p_tune.add_argument(
+        "--budget",
+        type=int,
+        default=tune.DEFAULT_MEASUREMENT_BUDGET,
+        metavar="N",
+        help="stop after this many measurements and report the best so far",
+    )
+    p_tune.add_argument("--dry-run", action="store_true", help="measure but write nothing")
+    p_tune.add_argument("--json", action="store_true", help="emit machine-readable output")
+    p_tune.set_defaults(func=cmd_tune)
 
     p_profile = sub.add_parser(
         "profile",

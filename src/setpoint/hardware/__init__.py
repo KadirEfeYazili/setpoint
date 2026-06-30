@@ -8,6 +8,7 @@ becomes a note on the snapshot, never an exception and never a fabricated value.
 from __future__ import annotations
 
 import ctypes
+import os
 import platform
 import sys
 
@@ -96,6 +97,7 @@ def host_info() -> HostInfo:
         arch=platform.machine(),
         python_version=f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         total_ram_bytes=total_ram_bytes(),
+        cpu_count=os.cpu_count(),
     )
 
 
