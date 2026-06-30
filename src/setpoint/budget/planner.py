@@ -17,7 +17,9 @@ _CONTEXT_LADDER = (1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072)
 # Cache quantization to suggest as the first thing to try.
 _FALLBACK_CACHE_TYPE = "q8_0"
 
-# Above this share of system RAM, what stays on the CPU starts to cost paging too.
+# Above this share of *available* RAM, what stays on the CPU starts to cost paging on
+# top of the slower compute. Judging against total RAM instead is how a plan gets drawn
+# that a machine cannot actually hold.
 _RAM_PRESSURE_FRACTION = 0.7
 
 
@@ -29,7 +31,10 @@ def plan(
     cache_type_v: str = "f16",
     host_ram_bytes: int | None = None,
 ) -> BudgetPlan:
-    """Build the full budget for one model, context and card."""
+    """Build the full budget for one model, context and card.
+
+    `host_ram_bytes` should be the RAM available now, not the RAM installed.
+    """
     estimate = kv_module.estimate(model, context, cache_type_k, cache_type_v)
     offload = fit(model, estimate, vram.ceiling_bytes)
 
@@ -42,8 +47,9 @@ def plan(
     notes.extend(estimate.notes if estimate else ())
     if host_ram_bytes and offload.cpu_bytes > host_ram_bytes * _RAM_PRESSURE_FRACTION:
         notes.append(
-            "What stays on the CPU is a large share of system RAM; expect paging on top "
-            "of the slower compute."
+            f"What stays on the CPU ({offload.cpu_bytes / (1024**3):.2f} GiB) is most of "
+            f"the {host_ram_bytes / (1024**3):.2f} GiB of RAM free right now; expect "
+            "paging on top of the slower compute, and close something before measuring."
         )
 
     return BudgetPlan(

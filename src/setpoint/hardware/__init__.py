@@ -44,6 +44,7 @@ __all__ = [
     "match_adapter",
     "probe",
     "probe_wddm",
+    "available_ram_bytes",
     "total_ram_bytes",
 ]
 
@@ -64,23 +65,40 @@ class _MemoryStatusEx(ctypes.Structure):
 
 def total_ram_bytes() -> int | None:
     """Physical RAM, without pulling in psutil."""
+    return _ram_bytes("total")
+
+
+def available_ram_bytes() -> int | None:
+    """RAM that could be handed out right now.
+
+    This is the figure that matters for an offload plan: what stays on the CPU has to
+    fit in what is free, not in what the machine was sold with. Reading the total
+    instead is how a plan gets drawn that takes the machine down.
+    """
+    return _ram_bytes("available")
+
+
+def _ram_bytes(which: str) -> int | None:
     system = platform.system()
     try:
         if system == "Windows":
             status = _MemoryStatusEx()
             status.dwLength = ctypes.sizeof(_MemoryStatusEx)
             if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):  # type: ignore[attr-defined]
-                return int(status.ullTotalPhys)
+                return int(status.ullTotalPhys if which == "total" else status.ullAvailPhys)
             return None
         if system == "Linux":
+            wanted = "MemTotal:" if which == "total" else "MemAvailable:"
             with open("/proc/meminfo", encoding="utf-8") as fh:
                 for line in fh:
-                    if line.startswith("MemTotal:"):
+                    if line.startswith(wanted):
                         return int(line.split()[1]) * 1024
             return None
         if system == "Darwin":
             import subprocess
 
+            if which != "total":
+                return None
             out = subprocess.run(
                 ["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, check=False
             )
@@ -97,6 +115,7 @@ def host_info() -> HostInfo:
         arch=platform.machine(),
         python_version=f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         total_ram_bytes=total_ram_bytes(),
+        available_ram_bytes=available_ram_bytes(),
         cpu_count=os.cpu_count(),
     )
 

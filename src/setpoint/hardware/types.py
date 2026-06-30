@@ -121,6 +121,7 @@ class HostInfo:
     arch: str
     python_version: str
     total_ram_bytes: int | None = None
+    available_ram_bytes: int | None = None
     cpu_count: int | None = None
 
 

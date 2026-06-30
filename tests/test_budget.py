@@ -226,14 +226,24 @@ class TestPlan:
         assert result.kv is None
         assert any("no KV cache model" in note for note in result.notes)
 
-    def test_ram_pressure_is_called_out(self):
+    def test_ram_pressure_is_judged_against_what_is_free(self):
+        # The figure that matters is RAM available now, not RAM installed.
         result = budget.plan(
             model(block_count=40, block_bytes=GIB),
             8192,
             vram.assumed(4 * GIB),
             host_ram_bytes=8 * GIB,
         )
-        assert any("system RAM" in note for note in result.notes)
+        assert any("free right now" in note for note in result.notes)
+
+    def test_plenty_of_free_ram_raises_no_note(self):
+        result = budget.plan(
+            model(block_count=4, block_bytes=100 * MIB),
+            1024,
+            vram.assumed(4 * GIB),
+            host_ram_bytes=8 * GIB,
+        )
+        assert not any("free right now" in note for note in result.notes)
 
     def test_the_json_payload_carries_the_derived_numbers(self):
         payload = budget.plan(model(), 4096, vram.assumed(4 * GIB)).to_dict()

@@ -287,7 +287,7 @@ def cmd_budget(args: argparse.Namespace) -> int:
         )
     else:
         snapshot = probe_hardware(include_wddm=False)
-        ram = snapshot.host.total_ram_bytes
+        ram = snapshot.host.available_ram_bytes
         vram = budget.from_snapshot(
             snapshot,
             gpu_index=args.gpu,
@@ -537,7 +537,14 @@ def cmd_tune(args: argparse.Namespace) -> int:
         print("setpoint: no NVIDIA GPU was found to tune against.", file=sys.stderr)
         return EXIT_ERROR
 
-    plan = budget.plan(model, args.context, vram, args.kv_type, args.kv_type)
+    plan = budget.plan(
+        model,
+        args.context,
+        vram,
+        args.kv_type,
+        args.kv_type,
+        host_ram_bytes=snapshot.host.available_ram_bytes,
+    )
 
     # Device ids are renumbered across reboots, so the one to use is resolved now and
     # checked against the card the profile will be filed under.
