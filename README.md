@@ -12,9 +12,9 @@
 `setpoint` finds the configuration your hardware can actually hold, by measuring it
 instead of guessing, and remembers the answer.
 
-> **Status: early development.** `doctor`, `budget` and `profile` run today. `tune`,
-> `run` and `bench` need a llama.cpp build to measure with, which the development
-> machine does not have yet. See [Roadmap](#roadmap).
+> **Status: early development.** `doctor`, `budget`, `tune` and `profile` run today and
+> have been used to measure real hardware. `run` and `bench` do not exist yet. See
+> [Roadmap](#roadmap).
 
 ---
 
@@ -124,6 +124,47 @@ context and compute buffers of a process that has not started yet, so it is a st
 default rather than a measurement. And where an architecture's KV cache does not follow
 the usual per-head layout, setpoint says it cannot size it instead of printing a number
 it did not derive.
+
+## Tuning
+
+`tune` starts from the budget, screens the candidates cheaply, then walks one parameter
+at a time, measuring each move. The result is a profile keyed to this machine.
+
+```
+$ setpoint tune qwen2.5:3b -c 1024
+
+plan
+  seeded from the budget: -ngl 37, 36 of 36 blocks
+  target 1024 tokens, optimising for speed
+  measuring on Vulkan0 -- NVIDIA GeForce GTX 1650
+
+search
+  warmup   -ngl 99      39.12 kept
+  screen   -ngl 35      47.37 kept
+  screen   -ngl 37      49.40 kept                  best of the seeds
+  descend  -ngl 36      49.22 no better             -ngl 36
+  descend  -ngl 37      53.66 improved              -ub 128
+  descend  -ngl 35      48.77 no better             -ngl 35
+  confirm  -ngl 37      52.77 kept
+  baseline -ngl 99      50.77 kept
+
+result
+  -ngl 37, -ub 128, flash attention on
+  52.77 tok/s, spread 0.4%, peak vram 2560 MiB
+  speedup 1.04x over the llama.cpp default
+```
+
+Three details in that trace are the discipline showing through. The first measurement is
+thrown away, because a GPU reads low while its clocks ramp and the readings climb over
+the first minute of a session. The baseline is measured last, next to the winner, so the
+two numbers that form the speedup claim share a thermal state -- measured first, the
+baseline was the coldest reading of the session and inflated every result. And the
+accelerator is resolved by name and printed, because device ids are positional and a
+reboot can renumber them: an integrated GPU will happily accept the work and report a
+number that describes itself rather than the card the profile claims.
+
+`Ctrl-C` keeps the best configuration measured so far. A result whose spread is too wide
+is not written to a profile at all.
 
 ## Roadmap
 
