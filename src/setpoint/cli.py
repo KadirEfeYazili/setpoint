@@ -572,6 +572,15 @@ def cmd_tune(args: argparse.Namespace) -> int:
     )
     print(f"  target {args.context} tokens, optimising for {args.optimize}")
     print(f"  measuring on {chosen.id} -- {chosen.name}")
+    free_ram = snapshot.host.available_ram_bytes
+    if free_ram and plan.offload.cpu_bytes > free_ram:
+        print(
+            f"setpoint: the plan leaves {gib(plan.offload.cpu_bytes)} on the CPU but only "
+            f"{gib(free_ram)} of RAM is free. Measuring this would page the machine to a "
+            "halt. Close something, or lower the context.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
     if wrong_card:
         print(
             style.yellow(f"  that is not {vram.gpu_name}, so this run cannot back a profile for it")

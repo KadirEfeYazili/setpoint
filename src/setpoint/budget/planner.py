@@ -20,7 +20,11 @@ _FALLBACK_CACHE_TYPE = "q8_0"
 # Above this share of *available* RAM, what stays on the CPU starts to cost paging on
 # top of the slower compute. Judging against total RAM instead is how a plan gets drawn
 # that a machine cannot actually hold.
-_RAM_PRESSURE_FRACTION = 0.7
+#
+# Half rather than most: a partial offload reads the whole model file, so the page cache
+# it generates competes for the same RAM as the weights it leaves resident. A measurement
+# run at 58% of 3.6 GiB free took the development machine down.
+_RAM_PRESSURE_FRACTION = 0.5
 
 
 def plan(
@@ -47,9 +51,10 @@ def plan(
     notes.extend(estimate.notes if estimate else ())
     if host_ram_bytes and offload.cpu_bytes > host_ram_bytes * _RAM_PRESSURE_FRACTION:
         notes.append(
-            f"What stays on the CPU ({offload.cpu_bytes / (1024**3):.2f} GiB) is most of "
-            f"the {host_ram_bytes / (1024**3):.2f} GiB of RAM free right now; expect "
-            "paging on top of the slower compute, and close something before measuring."
+            f"What stays on the CPU ({offload.cpu_bytes / (1024**3):.2f} GiB) is a large "
+            f"share of the {host_ram_bytes / (1024**3):.2f} GiB of RAM free right now, and "
+            f"reading the model will cache up to {model.file_bytes / (1024**3):.2f} GiB more. "
+            "Close something before measuring."
         )
 
     return BudgetPlan(
