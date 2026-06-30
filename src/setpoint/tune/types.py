@@ -19,6 +19,7 @@ from ..profile import Config
 class Stage(str, Enum):
     """Which part of the search a step belongs to."""
 
+    WARMUP = "warmup"
     BASELINE = "baseline"
     SCREEN = "screen"
     DESCEND = "descend"

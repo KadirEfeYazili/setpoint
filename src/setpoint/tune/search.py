@@ -5,8 +5,12 @@ the search starts from its seeds, screens them cheaply, and then walks one param
 a time from the survivor. Every step is recorded, and interrupting the search keeps
 whatever it had found.
 
-    seeds -> successive halving -> coordinate descent -> confirm at full effort
+    warm up -> successive halving -> coordinate descent -> confirm, then baseline
 """
+
+# A GPU ramps its clocks over the first minute of sustained load, so the first
+# measurements of a session read low. llama-bench discards a warmup pass inside each
+# invocation, which does not help across them; this is the session-level equivalent.
 
 from __future__ import annotations
 
@@ -114,15 +118,13 @@ def search(
         return SearchResult(None, None, tuple(steps), 0, False, "no seed configurations")
 
     try:
-        baseline_trial = None
-        if baseline is not None:
-            baseline_trial = state.run(baseline, full_effort, Stage.BASELINE)
+        state.run(baseline or seeds[0], screen_effort, Stage.WARMUP, force=True)
 
         survivor = _screen(seeds, screen_effort, state)
         if survivor is None:
             return SearchResult(
                 None,
-                baseline_trial,
+                None,
                 tuple(steps),
                 state.count,
                 False,
@@ -132,6 +134,12 @@ def search(
         best = _descend(survivor, space, screen_effort, state)
         confirmed = state.run(best.config, full_effort, Stage.CONFIRM, force=True)
         winner = confirmed if confirmed.usable else best
+
+        # The baseline is measured last, next to the winner, so the two numbers that
+        # form the speedup claim were taken in the same thermal state.
+        baseline_trial = None
+        if baseline is not None:
+            baseline_trial = state.run(baseline, full_effort, Stage.BASELINE, force=True)
         if not confirmed.usable:
             reason = "the winning configuration failed its confirmation run"
         elif state.exhausted:
@@ -210,6 +218,7 @@ class _State:
         # Keyed by effort as well as configuration: the same settings measured briefly
         # and measured properly are two different results, and only one may be reported.
         self._seen: dict[tuple[Config, Effort], Trial] = {}
+        self.discarded: set[tuple[Config, Effort]] = set()
         self.count = 0
         self.baseline: Trial | None = None
 
@@ -234,6 +243,8 @@ class _State:
         self._seen[key] = trial
         if stage is Stage.BASELINE:
             self.baseline = trial
+        if stage is Stage.WARMUP:
+            self.discarded.add(key)
         if not quiet:
             verdict = Verdict.KEPT if trial.usable else Verdict.FAILED
             self.note(stage, trial, verdict, trial.detail)
@@ -249,5 +260,9 @@ class _State:
             self._on_step(step)
 
     def best_so_far(self) -> Trial | None:
-        usable = [t for t in self._seen.values() if t.usable and t is not self.baseline]
+        usable = [
+            trial
+            for key, trial in self._seen.items()
+            if trial.usable and trial is not self.baseline and key not in self.discarded
+        ]
         return max(usable, key=lambda t: t.score or 0.0) if usable else None

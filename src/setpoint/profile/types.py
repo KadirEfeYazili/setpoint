@@ -25,6 +25,11 @@ DIGEST_CONTENT = "content"
 # Decimal places kept for a stored statistic. See spec section 7.
 STORED_DIGITS = 6
 
+# Power is an indicator, not a measurement, so one decimal is already more than the
+# NVML sampling supports. A speedup past three decimals is noise dressed as precision.
+WATT_DIGITS = 1
+SPEEDUP_DIGITS = 3
+
 
 class ProfileError(Exception):
     """A profile could not be read, or may not be written."""
@@ -133,6 +138,10 @@ class Measurement:
     peak_vram_mb: int | None = None
     avg_watt: float | None = None
 
+    def __post_init__(self) -> None:
+        if self.avg_watt is not None:
+            object.__setattr__(self, "avg_watt", round(float(self.avg_watt), WATT_DIGITS))
+
     @classmethod
     def from_statistics(
         cls,
@@ -187,6 +196,10 @@ class Baseline:
     config: Config
     decode_tok_s: float
     speedup: float
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "decode_tok_s", round(float(self.decode_tok_s), STORED_DIGITS))
+        object.__setattr__(self, "speedup", round(float(self.speedup), SPEEDUP_DIGITS))
 
     @property
     def improved(self) -> bool:

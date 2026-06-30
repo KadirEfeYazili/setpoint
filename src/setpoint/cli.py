@@ -558,7 +558,11 @@ def cmd_tune(args: argparse.Namespace) -> int:
     print(style.bold("model"))
     print(f"  {resolved.reference}   {style.dim(model.architecture + ' ' + model.parameter_label)}")
     print(style.bold("\nplan"))
-    print(f"  seeded from the budget: -ngl {plan.offload.n_gpu_layers} of {model.block_count}")
+    seeded = plan.offload
+    print(
+        f"  seeded from the budget: -ngl {seeded.n_gpu_layers}, "
+        f"{seeded.blocks_on_gpu} of {model.block_count} blocks"
+    )
     print(f"  target {args.context} tokens, optimising for {args.optimize}")
     print(f"  measuring on {chosen.id} -- {chosen.name}")
     if wrong_card:

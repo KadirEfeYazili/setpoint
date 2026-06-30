@@ -175,6 +175,40 @@ class TestSearch:
         assert result.measurements > 0
 
 
+class TestWarmUp:
+    """A GPU reads low while its clocks ramp, so the first measurement is thrown away."""
+
+    def test_the_first_measurement_is_discarded(self):
+        landscape = Landscape()
+        result = search(seeds(), SPACE, landscape, SCREEN, FULL)
+        warmups = [s for s in result.steps if s.stage is Stage.WARMUP]
+        assert len(warmups) == 1
+        assert result.steps[0].stage is Stage.WARMUP
+
+    def test_the_warm_up_never_becomes_the_answer(self):
+        def only_the_first_is_fast(cfg, effort):
+            score = 100.0 if not landscape.asked else 10.0
+            landscape.asked.append((cfg, effort))
+            return Trial(cfg, score=score, spread=0.005, reliable=True)
+
+        landscape = Landscape()
+        result = search(seeds(), SPACE, only_the_first_is_fast, SCREEN, FULL)
+        assert result.best.score == 10.0
+
+    def test_an_interrupt_never_reports_the_warm_up_as_best(self):
+        calls = {"n": 0}
+
+        def fast_then_stop(cfg, effort):
+            calls["n"] += 1
+            if calls["n"] > 1:
+                raise KeyboardInterrupt
+            return Trial(cfg, score=999.0, spread=0.005, reliable=True)
+
+        result = search(seeds(), SPACE, fast_then_stop, SCREEN, FULL)
+        assert result.interrupted
+        assert result.best is None
+
+
 class TestBaseline:
     def test_the_baseline_is_measured_at_full_effort_and_reported(self):
         landscape = Landscape()
@@ -182,6 +216,12 @@ class TestBaseline:
         assert result.baseline is not None
         assert (config(n_gpu_layers=37), FULL) in landscape.asked
         assert result.speedup > 1.0
+
+    def test_the_baseline_is_measured_next_to_the_winner_not_first(self):
+        # Measured first, the baseline was the coldest reading and inflated the speedup.
+        result = search(seeds(), SPACE, Landscape(), SCREEN, FULL, baseline=config(n_gpu_layers=37))
+        stages = [s.stage for s in result.steps]
+        assert stages.index(Stage.BASELINE) > stages.index(Stage.CONFIRM)
 
     def test_losing_to_the_baseline_is_reported_not_hidden(self):
         # A flat landscape the tuner cannot climb, with a baseline that already wins.
