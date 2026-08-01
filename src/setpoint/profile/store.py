@@ -126,12 +126,7 @@ def to_mapping(profile: Profile) -> dict[str, Any]:
         },
         "config": _config_mapping(profile.config),
         "measurement": _measurement_mapping(profile.measurement),
-        "baseline": {
-            "label": profile.baseline.label,
-            "config": _config_mapping(profile.baseline.config),
-            "decode_tok_s": profile.baseline.decode_tok_s,
-            "speedup": profile.baseline.speedup,
-        },
+        "baseline": _baseline_mapping(profile.baseline),
         "created": profile.created,
     }
     if profile.notes:
@@ -172,15 +167,37 @@ def from_mapping(raw: dict[str, Any], source: Path | None = None) -> Profile:
         ),
         config=_read_config(_section(raw, "config", where)),
         measurement=measurement,
-        baseline=Baseline(
-            label=_require(baseline_raw, "label", str, where),
-            config=_read_config(baseline_raw.get("config") or {}),
-            decode_tok_s=float(_require(baseline_raw, "decode_tok_s", (int, float), where)),
-            speedup=float(_require(baseline_raw, "speedup", (int, float), where)),
-        ),
+        baseline=_read_baseline(baseline_raw, where),
         created=_require(raw, "created", str, where),
         model=_read_model(raw.get("model")),
         notes=tuple(str(n) for n in raw.get("notes") or ()),
+    )
+
+
+def _baseline_mapping(baseline: Baseline) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "label": baseline.label,
+        "config": _config_mapping(baseline.config),
+        "decode_tok_s": baseline.decode_tok_s,
+        "speedup": baseline.speedup,
+    }
+    if baseline.failed:
+        payload["failed"] = True
+        payload["detail"] = baseline.detail
+    return payload
+
+
+def _read_baseline(raw: dict[str, Any], where: str) -> Baseline:
+    failed = bool(raw.get("failed"))
+    config = _read_config(raw.get("config") or {})
+    label = _require(raw, "label", str, where)
+    if failed:
+        return Baseline(label=label, config=config, failed=True, detail=raw.get("detail"))
+    return Baseline(
+        label=label,
+        config=config,
+        decode_tok_s=float(_require(raw, "decode_tok_s", (int, float), where)),
+        speedup=float(_require(raw, "speedup", (int, float), where)),
     )
 
 

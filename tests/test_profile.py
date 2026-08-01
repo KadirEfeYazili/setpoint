@@ -93,6 +93,41 @@ class TestEvidenceRule:
         assert not store.load(path).baseline.improved
 
 
+class TestFailedBaseline:
+    """On a small card the backend default may not start at all. See spec 8.1."""
+
+    def _failed(self) -> prof.Profile:
+        return profile(
+            baseline=prof.Baseline(
+                label="llama.cpp default (-ngl 99)",
+                config=prof.Config(n_gpu_layers=99),
+                failed=True,
+                detail="the backend could not allocate enough device memory",
+            )
+        )
+
+    def test_a_profile_whose_baseline_never_ran_is_still_written(self, tmp_path):
+        restored = store.load(store.save(self._failed(), tmp_path))
+        assert restored.baseline.failed
+        assert restored.baseline.decode_tok_s is None
+        assert restored.baseline.speedup is None
+
+    def test_the_reason_survives_the_round_trip(self, tmp_path):
+        restored = store.load(store.save(self._failed(), tmp_path))
+        assert "device memory" in restored.baseline.detail
+
+    def test_anything_that_ran_beats_a_baseline_that_did_not(self):
+        assert self._failed().baseline.improved
+
+    def test_a_normal_baseline_still_requires_its_numbers(self, tmp_path):
+        payload = yaml.safe_load(store.dumps(profile()))
+        payload["baseline"].pop("speedup")
+        path = tmp_path / "hand-edited.yaml"
+        path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+        with pytest.raises(prof.ProfileError, match="speedup"):
+            store.load(path)
+
+
 class TestRoundTrip:
     def test_a_profile_survives_a_write_and_a_read(self, tmp_path):
         original = profile()

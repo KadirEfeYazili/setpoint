@@ -190,20 +190,32 @@ class Measurement:
 
 @dataclass(frozen=True)
 class Baseline:
-    """What the configuration was compared against, and by how much it won."""
+    """What the configuration was compared against, and how it compared.
+
+    A baseline that could not run at all is a legitimate result and carries a stronger
+    claim than a ratio: on a small card the backend's own default may fail to start,
+    and a configuration that runs beats one that does not. See spec section 8.1.
+    """
 
     label: str
     config: Config
-    decode_tok_s: float
-    speedup: float
+    decode_tok_s: float | None = None
+    speedup: float | None = None
+    failed: bool = False
+    detail: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "decode_tok_s", round(float(self.decode_tok_s), STORED_DIGITS))
-        object.__setattr__(self, "speedup", round(float(self.speedup), SPEEDUP_DIGITS))
+        if self.decode_tok_s is not None:
+            object.__setattr__(self, "decode_tok_s", round(float(self.decode_tok_s), STORED_DIGITS))
+        if self.speedup is not None:
+            object.__setattr__(self, "speedup", round(float(self.speedup), SPEEDUP_DIGITS))
 
     @property
     def improved(self) -> bool:
-        return self.speedup > 1.0
+        """A baseline that never started is beaten by anything that did."""
+        if self.failed:
+            return True
+        return self.speedup is not None and self.speedup > 1.0
 
 
 @dataclass(frozen=True)

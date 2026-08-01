@@ -469,7 +469,7 @@ def _profile_from(
 ) -> profiles.Profile | None:
     """Turn a finished search into a profile, or nothing if it cannot back one."""
     best, baseline = result.best, result.baseline
-    if best is None or best.run is None or baseline is None or baseline.score is None:
+    if best is None or best.run is None or baseline is None:
         return None
 
     decode = best.run.sample_of(MeasurementKind.DECODE)
@@ -491,12 +491,7 @@ def _profile_from(
         target=target,
         config=best.config,
         measurement=measurement,
-        baseline=profiles.Baseline(
-            label="llama.cpp default (-ngl 99)",
-            config=baseline.config,
-            decode_tok_s=baseline.score,
-            speedup=result.speedup or 0.0,
-        ),
+        baseline=_baseline_of(baseline, result),
         created=profiles.now(),
         notes=tuple(n for n in (result.reason, best.detail) if n),
     )
@@ -506,6 +501,24 @@ def _same_card(device_name: str, gpu_name: str) -> bool:
     """Whether a backend device and an NVML GPU are the same piece of hardware."""
     a, b = device_name.lower(), gpu_name.lower()
     return a in b or b in a
+
+
+def _baseline_of(baseline: tune.Trial, result: tune.SearchResult) -> profiles.Baseline:
+    """The comparison, including the case where the backend default never started."""
+    label = "llama.cpp default (-ngl 99)"
+    if baseline.score is None:
+        return profiles.Baseline(
+            label=label,
+            config=baseline.config,
+            failed=True,
+            detail=baseline.detail or "the baseline configuration did not run",
+        )
+    return profiles.Baseline(
+        label=label,
+        config=baseline.config,
+        decode_tok_s=baseline.score,
+        speedup=result.speedup or 0.0,
+    )
 
 
 def cmd_tune(args: argparse.Namespace) -> int:
@@ -683,13 +696,19 @@ def _render_tune_result(
     if result.best.peak_vram_mib:
         _row(style, "peak vram", f"{result.best.peak_vram_mib} MiB")
 
-    if result.baseline and result.baseline.score:
+    if result.baseline is not None and result.baseline.score is not None:
         speedup = result.speedup or 0.0
         painted = style.green(f"{speedup:.2f}x") if speedup > 1 else style.yellow(f"{speedup:.2f}x")
         print()
         _row(style, "baseline (-ngl 99)", f"{result.baseline.score:.2f}")
         verdict = "" if speedup > 1 else "  no better than the default"
         _row(style, "speedup", "", painted + verdict)
+    elif result.baseline is not None:
+        print()
+        print(style.green("  the llama.cpp default did not start on this card at all"))
+        for line in wrap(f"it reported: {result.baseline.detail}", term_width() - 4):
+            print(style.dim(f"    {line}"))
+        print(style.dim("  a configuration that runs is the result here, not a ratio"))
 
     if result.best.detail:
         print()
