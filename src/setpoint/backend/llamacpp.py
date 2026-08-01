@@ -298,9 +298,21 @@ def _series(record: dict[str, object], key: str, mean_key: str, notes: list[str]
     return Statistic((mean,))
 
 
-def _tail(text: str, lines: int = 5) -> str:
-    stripped = [line for line in (text or "").splitlines() if line.strip()]
-    return " / ".join(stripped[-lines:]) if stripped else "no output"
+# Lines worth surfacing when a run fails. Everything else the backend prints on the way
+# up is library loading, which explains nothing about why it stopped.
+_ERROR_MARKERS = ("error", "failed", "out of memory", "cannot", "unable")
+
+
+def _tail(text: str, lines: int = 3) -> str:
+    """The part of the backend's output that says why it stopped."""
+    stripped = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    if not stripped:
+        return "no output"
+    interesting = [
+        line for line in stripped if any(marker in line.lower() for marker in _ERROR_MARKERS)
+    ]
+    chosen = (interesting or stripped)[-lines:]
+    return " / ".join(chosen)
 
 
 def _str(record: dict[str, object], key: str) -> str | None:

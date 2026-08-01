@@ -224,6 +224,20 @@ class TestRun:
         with pytest.raises(BackendError, match="failed to load model"):
             backend.run(spec())
 
+    def test_the_reason_is_surfaced_not_the_library_loading(self, backend, monkeypatch):
+        noise = "\n".join(
+            [
+                "load_backend: loaded RPC backend from C:/llama/ggml-rpc.dll",
+                "load_backend: loaded Vulkan backend from C:/llama/ggml-vulkan.dll",
+                "ggml_vulkan: Device memory allocation of size 1070244864 failed.",
+            ]
+        )
+        self._stub(monkeypatch, returncode=1, stderr=noise)
+        with pytest.raises(BackendError) as caught:
+            backend.run(spec())
+        assert "Device memory allocation" in str(caught.value)
+        assert "ggml-rpc.dll" not in str(caught.value)
+
     def test_a_timeout_is_reported_as_one(self, backend, monkeypatch):
         self._stub(monkeypatch, raises=subprocess.TimeoutExpired("llama-bench", 1.0))
         with pytest.raises(BackendError, match="did not finish"):
