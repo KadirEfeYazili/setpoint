@@ -28,9 +28,11 @@ from .types import (
 )
 
 BINARY_NAME = "llama-bench"
+SERVER_BINARY_NAME = "llama-server"
 
 # Points setpoint at a binary that is not on PATH.
 BINARY_ENV_VAR = "SETPOINT_LLAMA_BENCH"
+SERVER_ENV_VAR = "SETPOINT_LLAMA_SERVER"
 
 # A deep-context run repeats a long prefill several times, so the ceiling is generous.
 DEFAULT_TIMEOUT_S = 900.0
@@ -51,11 +53,31 @@ MIN_SUPPORTED_BUILD = 6000
 
 def find_binary(explicit: str | Path | None = None) -> Path | None:
     """Locate llama-bench: an explicit path, then the environment, then PATH."""
-    for candidate in (explicit, os.environ.get(BINARY_ENV_VAR)):
+    return _locate(BINARY_NAME, BINARY_ENV_VAR, explicit)
+
+
+def find_server_binary(explicit: str | Path | None = None) -> Path | None:
+    """Locate llama-server, which is what `run` starts.
+
+    Falls back to looking beside llama-bench: release archives ship both together, and
+    a user who pointed setpoint at one has almost certainly got the other.
+    """
+    found = _locate(SERVER_BINARY_NAME, SERVER_ENV_VAR, explicit)
+    if found is not None:
+        return found
+    bench = find_binary()
+    if bench is None:
+        return None
+    sibling = bench.with_name(SERVER_BINARY_NAME + bench.suffix)
+    return sibling if sibling.is_file() else None
+
+
+def _locate(name: str, env_var: str, explicit: str | Path | None) -> Path | None:
+    for candidate in (explicit, os.environ.get(env_var)):
         if candidate:
             path = Path(candidate).expanduser()
             return path if path.is_file() else None
-    found = shutil.which(BINARY_NAME)
+    found = shutil.which(name)
     return Path(found) if found else None
 
 
@@ -204,6 +226,46 @@ def parse_output(
         duration_s=duration_s,
         notes=tuple(dict.fromkeys(notes)),
     )
+
+
+def server_argv(
+    binary: str | Path,
+    model_path: str | Path,
+    config: object,
+    context: int,
+    devices: tuple[str, ...] = (),
+    extra: tuple[str, ...] = (),
+) -> list[str]:
+    """Command line for llama-server from a profile's configuration.
+
+    Long flag names throughout: the short forms differ between llama.cpp's tools and
+    have moved between releases, while the long ones have held still.
+    """
+    argv = [str(binary), "--model", str(model_path), "--ctx-size", str(context)]
+    pairs = (
+        ("--n-gpu-layers", getattr(config, "n_gpu_layers", None)),
+        ("--n-cpu-moe", getattr(config, "n_cpu_moe", None)),
+        ("--batch-size", getattr(config, "batch_size", None)),
+        ("--ubatch-size", getattr(config, "ubatch_size", None)),
+        ("--threads", getattr(config, "threads", None)),
+    )
+    for flag, value in pairs:
+        if value is not None:
+            argv += [flag, str(value)]
+    argv += [
+        "--cache-type-k",
+        str(getattr(config, "cache_type_k", "f16")),
+        "--cache-type-v",
+        str(getattr(config, "cache_type_v", "f16")),
+    ]
+    flash = getattr(config, "flash_attn", None)
+    if flash is not None:
+        argv += ["--flash-attn", "on" if flash else "off"]
+    if devices:
+        argv += ["--device", "/".join(devices)]
+    for override in getattr(config, "tensor_overrides", ()) or ():
+        argv += ["--override-tensor", str(override)]
+    return argv + list(extra)
 
 
 def select_device(devices: tuple[BackendDevice, ...], prefer: str | None) -> BackendDevice | None:

@@ -9,11 +9,15 @@ from __future__ import annotations
 from .llamacpp import (
     BINARY_ENV_VAR,
     BINARY_NAME,
+    SERVER_BINARY_NAME,
+    SERVER_ENV_VAR,
     LlamaCppBackend,
     find_binary,
+    find_server_binary,
     parse_devices,
     parse_output,
     select_device,
+    server_argv,
 )
 from .types import (
     BackendBuild,
@@ -28,6 +32,8 @@ from .types import (
 __all__ = [
     "BINARY_ENV_VAR",
     "BINARY_NAME",
+    "SERVER_BINARY_NAME",
+    "SERVER_ENV_VAR",
     "BackendBuild",
     "BackendDevice",
     "BackendError",
@@ -37,7 +43,9 @@ __all__ = [
     "MeasurementKind",
     "RunSpec",
     "find_binary",
+    "find_server_binary",
     "parse_devices",
     "parse_output",
     "select_device",
+    "server_argv",
 ]
