@@ -12,9 +12,8 @@
 `setpoint` finds the configuration your hardware can actually hold, by measuring it
 instead of guessing, and remembers the answer.
 
-> **Status: early development.** `doctor`, `budget`, `tune` and `profile` run today and
-> have been used to measure real hardware. `run` and `bench` do not exist yet. See
-> [Roadmap](#roadmap).
+> **Status: early development.** All seven commands run, and have been used to measure
+> real hardware. Nothing is published to a package index yet. See [Roadmap](#roadmap).
 
 ---
 
@@ -165,6 +164,36 @@ number that describes itself rather than the card the profile claims.
 
 `Ctrl-C` keeps the best configuration measured so far. A result whose spread is too wide
 is not written to a profile at all.
+
+## Applying and re-checking
+
+`run` starts llama-server with the profile measured for this machine. Anything after `--`
+goes to the server untouched.
+
+```
+$ setpoint run qwen2.5:3b -- --port 9090
+
+profile
+  32ca34ae9eef85a1   Qwen2.5 3B Instruct Q4_K_M
+  measured               52.77 t/s   2026-09-08T18:34:19Z
+```
+
+`bench` re-measures the stored configuration and says whether the profile still describes
+the machine. A driver update, a backend update or a new card breaks the signature; a
+quieter or busier machine shows up here as drift.
+
+```
+$ setpoint bench qwen2.5:3b
+
+  profile claims         52.77 t/s   2026-09-08T18:34:19Z
+  measured now           51.76 t/s   spread 1.4%
+  difference                         -1.9%
+
+the profile still holds
+```
+
+It exits 1 when the difference leaves the tolerance, which makes it usable from a
+scheduler.
 
 ## Roadmap
 
