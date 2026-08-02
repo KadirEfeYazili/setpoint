@@ -134,6 +134,8 @@ def _weights(header: GgufHeader, block_count: int, notes: list[str]) -> Weights:
     input_bytes = 0
     output_bytes = 0
     stray = 0
+    # No separate output projection means the token embedding is also the output head.
+    tied = not any(t.name.startswith("output.weight") for t in header.tensors)
 
     for tensor in header.tensors:
         index = _block_index(tensor.name)
@@ -162,6 +164,7 @@ def _weights(header: GgufHeader, block_count: int, notes: list[str]) -> Weights:
         expert_bytes=tuple(expert_bytes),
         input_bytes=input_bytes,
         output_bytes=output_bytes,
+        tied_embedding=tied,
     )
 
 

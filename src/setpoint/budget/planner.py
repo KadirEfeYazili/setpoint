@@ -1,8 +1,13 @@
 """Decide what fits on the GPU, and say what a different request would buy.
 
-llama.cpp offloads the last `n_gpu_layers` blocks, keeps the token embedding on the
-CPU, and moves the output head to the GPU only once every block already fits. The KV
-cache follows its block, so a block left on the CPU keeps its cache in system RAM.
+llama.cpp offloads the last `n_gpu_layers` blocks, and moves the output head to the GPU
+only once every block already fits. The KV cache follows its block, so a block left on
+the CPU keeps its cache in system RAM.
+
+One exception was found by measurement: on a model whose token embedding doubles as the
+output projection, those bytes stay on the GPU at every split, because the output matmul
+runs where the blocks run. Counting them as CPU-side understated the requirement by their
+full size and made the plan roughly two blocks optimistic.
 """
 
 from __future__ import annotations
@@ -75,7 +80,10 @@ def fit(model: ModelInfo, estimate: KvEstimate | None, ceiling_bytes: int) -> Of
     weights = model.weights
     kv_bytes = estimate.bytes_per_block if estimate else (0,) * model.block_count
 
-    used = 0
+    # A tied embedding is resident from the first offloaded block, so it is spent before
+    # any block is placed rather than counted against the CPU.
+    resident = weights.resident_bytes
+    used = resident
     placed = 0
     next_block = None
     for index in reversed(range(model.block_count)):
@@ -90,6 +98,8 @@ def fit(model: ModelInfo, estimate: KvEstimate | None, ceiling_bytes: int) -> Of
     first_on_gpu = model.block_count - placed
 
     gpu_weights = sum(weights.block_bytes[first_on_gpu:])
+    if placed:
+        gpu_weights += resident
     if output_on_gpu:
         gpu_weights += weights.output_bytes
     gpu_kv = sum(kv_bytes[first_on_gpu:])
