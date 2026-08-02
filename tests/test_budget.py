@@ -34,6 +34,7 @@ def model(
     architecture: str = "llama",
     sliding_window: int | None = None,
     experts: Experts | None = None,
+    tied_embedding: bool = False,
 ) -> ModelInfo:
     return ModelInfo(
         path=Path("model.gguf"),
@@ -54,6 +55,7 @@ def model(
             expert_bytes=(0,) * block_count,
             input_bytes=10 * MIB,
             output_bytes=20 * MIB,
+            tied_embedding=tied_embedding,
         ),
         parameter_count=1_000_000,
         quant_mix=(),
@@ -192,6 +194,36 @@ class TestFit:
         placed = planner.fit(model(), None, ceiling_bytes=0)
         assert placed.n_gpu_layers == 0
         assert placed.gpu_bytes == 0
+
+
+class TestTiedEmbedding:
+    """Measured: on a tied-embedding model those bytes sit on the GPU at every split.
+
+    The token embedding is also the output projection there, and the matmul runs where
+    the blocks run. Counting them CPU-side made the plan two blocks optimistic.
+    """
+
+    def test_a_tied_embedding_is_spent_before_any_block(self):
+        tied = planner.fit(model(tied_embedding=True), None, ceiling_bytes=250 * MIB)
+        loose = planner.fit(model(tied_embedding=False), None, ceiling_bytes=250 * MIB)
+        assert tied.weights_on_gpu_bytes > loose.weights_on_gpu_bytes - 10 * MIB
+        assert tied.n_gpu_layers <= loose.n_gpu_layers
+
+    def test_it_counts_towards_the_gpu_side_once_a_block_lands(self):
+        placed = planner.fit(model(tied_embedding=True), None, ceiling_bytes=250 * MIB)
+        assert placed.n_gpu_layers >= 1
+        assert placed.weights_on_gpu_bytes >= 10 * MIB
+
+    def test_an_untied_model_leaves_the_embedding_on_the_cpu(self):
+        # Refuted by measurement on a model with a separate output projection: those
+        # bytes were not resident, and assuming otherwise over-reserved by their size.
+        info = model(tied_embedding=False)
+        placed = planner.fit(info, None, ceiling_bytes=10 * GIB)
+        assert placed.cpu_bytes == info.weights.input_bytes
+
+    def test_nothing_on_the_gpu_means_nothing_resident(self):
+        placed = planner.fit(model(tied_embedding=True), None, ceiling_bytes=0)
+        assert placed.weights_on_gpu_bytes == 0
 
 
 class TestMaxContext:

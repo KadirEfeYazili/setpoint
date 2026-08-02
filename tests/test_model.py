@@ -95,6 +95,28 @@ class TestWeightGrouping:
         assert any("beyond the declared block count" in n for n in info.notes)
 
 
+class TestTiedEmbedding:
+    def test_a_separate_output_projection_means_untied(self):
+        assert not describe(dense_header()).weights.tied_embedding
+
+    def test_no_output_projection_means_tied(self):
+        head = dense_header()
+        kept = tuple(t for t in head.tensors if not t.name.startswith("output.weight"))
+        info = describe(header(head.metadata, kept))
+        assert info.weights.tied_embedding
+        assert info.weights.resident_bytes == info.weights.input_bytes
+
+    def test_an_untied_model_holds_nothing_resident(self):
+        assert describe(dense_header()).weights.resident_bytes == 0
+
+    def test_the_output_norm_alone_does_not_count_as_a_projection(self):
+        # output_norm is a tiny vector, not the head; its presence must not hide tying.
+        head = dense_header()
+        kept = tuple(t for t in head.tensors if not t.name.startswith("output.weight"))
+        assert any(t.name == "output_norm.weight" for t in kept)
+        assert describe(header(head.metadata, kept)).weights.tied_embedding
+
+
 class TestAttention:
     def test_head_counts_are_expanded_to_one_per_block(self):
         attention = describe(dense_header()).attention

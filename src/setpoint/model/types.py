@@ -61,14 +61,20 @@ class Experts:
 class Weights:
     """Tensor bytes grouped the way llama.cpp places them.
 
-    llama.cpp offloads the last `n_gpu_layers` blocks and keeps the token embedding
-    on the CPU; the output head moves to the GPU only once every block already fits.
+    llama.cpp offloads the last `n_gpu_layers` blocks; the output head moves to the GPU
+    only once every block already fits.
+
+    `tied_embedding` marks a model with no separate output projection, where the token
+    embedding doubles as the output head. Measured on such a model, its bytes stay
+    resident on the GPU at every offload split, so treating them as CPU-side understates
+    the requirement by their full size.
     """
 
     block_bytes: tuple[int, ...]
     expert_bytes: tuple[int, ...]
     input_bytes: int
     output_bytes: int
+    tied_embedding: bool = False
 
     @property
     def block_total_bytes(self) -> int:
@@ -81,6 +87,15 @@ class Weights:
     @property
     def total_bytes(self) -> int:
         return self.block_total_bytes + self.input_bytes + self.output_bytes
+
+    @property
+    def resident_bytes(self) -> int:
+        """Bytes that sit on the GPU whenever any block does.
+
+        On a tied-embedding model that is the token embedding, because it is also the
+        output projection and the matmul runs where the blocks run.
+        """
+        return self.input_bytes if self.tied_embedding else 0
 
 
 @dataclass(frozen=True)
