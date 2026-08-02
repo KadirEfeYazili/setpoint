@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import platform
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..backend import BackendBuild
@@ -74,6 +75,44 @@ def build_signature(
         driver=snapshot.driver.driver_version,
         backend=str(backend),
         platform=platform_tag(),
+    )
+
+
+@dataclass(frozen=True)
+class MachineFacts:
+    """The machine half of a signature: what is knowable without running anything."""
+
+    gpu: str
+    vram_total_mb: int
+    driver: str
+    platform: str
+
+
+def machine_facts(snapshot: HardwareSnapshot, gpu_index: int | None = None) -> MachineFacts | None:
+    """Read the machine half of a signature, or `None` if the GPU cannot be identified."""
+    gpu = _select_gpu(snapshot, gpu_index)
+    if gpu is None or not snapshot.driver.driver_version:
+        return None
+    return MachineFacts(
+        gpu=gpu.name,
+        vram_total_mb=gpu.vram_total_bytes // (1024 * 1024),
+        driver=snapshot.driver.driver_version,
+        platform=platform_tag(),
+    )
+
+
+def describes_machine(signature: Signature, facts: MachineFacts) -> bool:
+    """Whether a profile was measured on this machine.
+
+    The backend build is deliberately not compared: only a run reports it, and a caller
+    that has not run anything yet still needs to know which profiles could apply. The
+    build is checked when the profile is actually used.
+    """
+    return (
+        signature.gpu == facts.gpu
+        and signature.vram_total_mb == facts.vram_total_mb
+        and signature.driver == facts.driver
+        and signature.platform == facts.platform
     )
 
 
