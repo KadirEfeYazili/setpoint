@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import subprocess
 import sys
 from typing import Any
 
@@ -18,10 +19,14 @@ from . import profile as profiles
 from .backend import (
     BINARY_ENV_VAR,
     BINARY_NAME,
+    SERVER_BINARY_NAME,
+    SERVER_ENV_VAR,
     BackendError,
     LlamaCppBackend,
     MeasurementKind,
+    find_server_binary,
     select_device,
+    server_argv,
 )
 from .hardware import probe as probe_hardware
 from .model import ModelError, analyze, resolve
@@ -30,6 +35,11 @@ from .render import Style, color_enabled, gib, human_bytes, short_path, term_wid
 EXIT_OK = 0
 EXIT_PROBLEM = 1
 EXIT_ERROR = 2
+
+# How far a re-measurement may drift before a profile stops describing the machine.
+# Wider than the run-to-run spread observed on real hardware, narrow enough that a
+# driver or backend change shows up.
+REGRESSION_TOLERANCE = 0.05
 
 _MARKS = {
     doctor.Outcome.PASS: ("ok", "green"),
@@ -716,6 +726,221 @@ def _render_tune_result(
             print(style.grey(f"  {line}"))
 
 
+def _stored_profile(
+    args: argparse.Namespace, style: Style
+) -> tuple[profiles.Profile | None, object, object, int]:
+    """Find the profile for this machine and this model, or explain why there is none."""
+    try:
+        resolved = resolve(args.model)
+        model = analyze(resolved.path)
+    except ModelError as exc:
+        print(f"setpoint: {exc}", file=sys.stderr)
+        return None, None, None, EXIT_ERROR
+
+    snapshot = probe_hardware(include_wddm=False)
+    backend = LlamaCppBackend()
+    if not backend.available:
+        print(
+            f"setpoint: {BINARY_NAME} was not found, so the signature cannot name a "
+            f"backend build. Put it on PATH or set {BINARY_ENV_VAR}.",
+            file=sys.stderr,
+        )
+        return None, model, snapshot, EXIT_ERROR
+
+    # The build is part of the signature, and only a run reports it, so the stored
+    # profiles are searched by everything else and the build is checked against them.
+    candidates = [
+        p
+        for p in profiles.load_all()
+        if p.model.architecture == model.architecture
+        and p.signature.gpu == (snapshot.gpus[0].name if snapshot.gpus else None)
+    ]
+    digest, size = profiles.model_digest(model.path)
+    matched = [
+        p
+        for p in candidates
+        if p.signature.model_digest == digest and p.signature.model_size_bytes == size
+    ]
+    if args.context is not None:
+        matched = [p for p in matched if p.target.context == args.context]
+
+    if not matched:
+        where = short_path(profiles.profiles_dir())
+        print(
+            f"setpoint: no profile for this model on this machine. Run `setpoint tune "
+            f"{args.model}` first; profiles live in {where}.",
+            file=sys.stderr,
+        )
+        return None, model, snapshot, EXIT_PROBLEM
+
+    matched.sort(key=lambda p: p.created, reverse=True)
+    if len(matched) > 1:
+        print(
+            style.dim(
+                f"  {len(matched)} profiles match; using the newest, for "
+                f"{matched[0].target.context} tokens"
+            )
+        )
+    return matched[0], model, snapshot, EXIT_OK
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    style = Style(color_enabled())
+    profile, model, snapshot, code = _stored_profile(args, style)
+    if profile is None:
+        return code
+
+    server = find_server_binary()
+    if server is None:
+        print(
+            f"setpoint: {SERVER_BINARY_NAME} was not found. Put it on PATH or set "
+            f"{SERVER_ENV_VAR}.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+
+    devices: tuple[str, ...] = ()
+    gpu_name = profile.signature.gpu
+    try:
+        listing = LlamaCppBackend().devices()
+    except BackendError:
+        listing = ()
+    if listing:
+        chosen = select_device(listing, args.device or gpu_name)
+        if chosen is None:
+            offered = ", ".join(f"{d.id} ({d.name})" for d in listing)
+            print(
+                f"setpoint: no accelerator matches {args.device or gpu_name!r}. Offered: {offered}",
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
+        devices = (chosen.id,)
+        if not _same_card(chosen.name, gpu_name):
+            print(
+                style.yellow(
+                    f"setpoint: this profile was measured on {gpu_name} but the backend "
+                    f"offers {chosen.name}; the settings may not suit it."
+                ),
+                file=sys.stderr,
+            )
+
+    argv = server_argv(
+        server,
+        profile.model.path or model.path,
+        profile.config,
+        profile.target.context,
+        devices=devices,
+        extra=tuple(args.forward),
+    )
+
+    print(style.bold("profile"))
+    print(f"  {profiles.signature_id(profile.signature)}   {profile.model.label}")
+    _row(style, "measured", f"{profile.measurement.decode_tok_s.median:.2f} t/s", profile.created)
+    print(style.bold("\ncommand"))
+    for line in wrap(" ".join(argv), term_width() - 4):
+        print(f"  {line}")
+
+    if args.print_only:
+        return EXIT_OK
+
+    print()
+    try:
+        return subprocess.run(argv, check=False).returncode
+    except OSError as exc:
+        print(f"setpoint: {SERVER_BINARY_NAME} could not be started: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    except KeyboardInterrupt:
+        return EXIT_OK
+
+
+def cmd_bench(args: argparse.Namespace) -> int:
+    """Re-measure a stored profile and say whether it still holds."""
+    style = Style(color_enabled())
+    profile, model, snapshot, code = _stored_profile(args, style)
+    if profile is None:
+        return code
+
+    backend = LlamaCppBackend()
+    try:
+        listing = backend.devices()
+    except BackendError as exc:
+        print(f"setpoint: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    chosen = select_device(listing, args.device or profile.signature.gpu)
+    if chosen is None or not _same_card(chosen.name, profile.signature.gpu):
+        print(
+            f"setpoint: this profile describes {profile.signature.gpu}, which the backend "
+            "does not offer right now.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+
+    gpu_index = snapshot.gpus[0].index if snapshot.gpus else None
+    measure = tune.BackendMeasure(
+        backend=backend,
+        model_path=profile.model.path or model.path,
+        objective=profile.target.optimize,
+        devices=(chosen.id,),
+        gpu_index=gpu_index,
+    )
+    effort = tune.Effort(
+        repetitions=args.repetitions, n_depth=profile.target.context, label="verify"
+    )
+
+    print(style.bold("profile"))
+    print(f"  {profiles.signature_id(profile.signature)}   {profile.model.label}")
+    print(f"  {style.dim('measuring on ' + chosen.id + ' -- ' + chosen.name)}")
+
+    print(style.bold("\nverifying"))
+    print(style.dim("  the first run is a warm-up and is thrown away"))
+    measure(profile.config, effort)
+    now = measure(profile.config, effort)
+
+    if not now.usable:
+        print(style.red(f"\nthe stored configuration no longer runs: {now.detail}"))
+        return EXIT_PROBLEM
+
+    claimed = profile.measurement.decode_tok_s.median
+    drift = now.score / claimed - 1
+    print()
+    _row(style, "profile claims", f"{claimed:.2f} t/s", profile.created)
+    _row(style, "measured now", f"{now.score:.2f} t/s", f"spread {now.spread or 0:.1%}")
+    within = abs(drift) <= REGRESSION_TOLERANCE
+    painted = style.green if within else style.red
+    _row(style, "difference", "", painted(f"{drift:+.1%}"))
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "signature_id": profiles.signature_id(profile.signature),
+                    "claimed_tok_s": claimed,
+                    "measured_tok_s": now.score,
+                    "difference": drift,
+                    "within_tolerance": within,
+                    "peak_vram_mb": now.peak_vram_mib,
+                },
+                indent=2,
+            )
+        )
+
+    if now.detail:
+        print()
+        for line in wrap(f"note: {now.detail}", term_width() - 2):
+            print(style.grey(f"  {line}"))
+
+    if not within:
+        print(
+            style.red(
+                f"\nthe profile no longer describes this machine: {drift:+.1%} against a "
+                f"{REGRESSION_TOLERANCE:.0%} tolerance. Re-run `setpoint tune`."
+            )
+        )
+        return EXIT_PROBLEM
+    print(style.green("\nthe profile still holds"))
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="setpoint",
@@ -837,6 +1062,44 @@ def build_parser() -> argparse.ArgumentParser:
     p_tune.add_argument("--json", action="store_true", help="emit machine-readable output")
     p_tune.set_defaults(func=cmd_tune)
 
+    p_run = sub.add_parser(
+        "run",
+        help="start llama-server with the stored profile",
+        description=(
+            "Looks up the profile measured for this model on this machine and starts "
+            "llama-server with it. Anything after -- is passed straight through."
+        ),
+    )
+    p_run.add_argument("model", help="path to a .gguf file, or an Ollama model name")
+    p_run.add_argument(
+        "-c", "--context", type=int, help="pick the profile measured for this context"
+    )
+    p_run.add_argument("--device", metavar="NAME", help="accelerator to run on")
+    p_run.add_argument(
+        "--print-only", action="store_true", help="show the command without running it"
+    )
+    p_run.add_argument("forward", nargs=argparse.REMAINDER, help="arguments passed to llama-server")
+    p_run.set_defaults(func=cmd_run)
+
+    p_bench = sub.add_parser(
+        "bench",
+        help="re-measure a stored profile and say whether it still holds",
+        description=(
+            "Measures the stored configuration again and compares it against what the "
+            "profile claims. Exits 1 when the machine no longer matches."
+        ),
+    )
+    p_bench.add_argument("model", help="path to a .gguf file, or an Ollama model name")
+    p_bench.add_argument(
+        "-c", "--context", type=int, help="pick the profile measured for this context"
+    )
+    p_bench.add_argument("--device", metavar="NAME", help="accelerator to measure on")
+    p_bench.add_argument(
+        "--repetitions", type=int, default=5, metavar="N", help="runs per measurement"
+    )
+    p_bench.add_argument("--json", action="store_true", help="emit machine-readable output")
+    p_bench.set_defaults(func=cmd_bench)
+
     p_profile = sub.add_parser(
         "profile",
         help="inspect stored calibration profiles",
@@ -862,9 +1125,27 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def split_forwarded(argv: list[str]) -> tuple[list[str], tuple[str, ...]]:
+    """Split on the first bare `--`. Everything after it belongs to the backend.
+
+    argparse's REMAINDER would swallow setpoint's own flags along with the rest, so the
+    boundary is drawn before parsing instead of during it.
+    """
+    if "--" not in argv:
+        return argv, ()
+    cut = argv.index("--")
+    return argv[:cut], tuple(argv[cut + 1 :])
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    own, forwarded = split_forwarded(list(argv if argv is not None else sys.argv[1:]))
+    args = parser.parse_args(own)
+    if forwarded:
+        if getattr(args, "func", None) is not cmd_run:
+            print("setpoint: only `run` forwards arguments after --", file=sys.stderr)
+            return EXIT_ERROR
+        args.forward = forwarded
     try:
         return int(args.func(args))
     except KeyboardInterrupt:
