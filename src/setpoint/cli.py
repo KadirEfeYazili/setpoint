@@ -1078,7 +1078,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "--print-only", action="store_true", help="show the command without running it"
     )
-    p_run.add_argument("forward", nargs=argparse.REMAINDER, help="arguments passed to llama-server")
     p_run.set_defaults(func=cmd_run)
 
     p_bench = sub.add_parser(
