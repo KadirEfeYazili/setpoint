@@ -6,7 +6,15 @@ another language does not have to read Python to know what to write.
 
 from __future__ import annotations
 
-from .signature import build_signature, model_digest, platform_tag, signature_id
+from .signature import (
+    MachineFacts,
+    build_signature,
+    describes_machine,
+    machine_facts,
+    model_digest,
+    platform_tag,
+    signature_id,
+)
 from .store import (
     HOME_ENV_VAR,
     dumps,
@@ -41,6 +49,7 @@ __all__ = [
     "HOME_ENV_VAR",
     "SCHEMA",
     "Baseline",
+    "MachineFacts",
     "Config",
     "Measurement",
     "ModelRef",
@@ -51,11 +60,13 @@ __all__ = [
     "Summary",
     "Target",
     "build_signature",
+    "describes_machine",
     "dumps",
     "find",
     "home",
     "load",
     "load_all",
+    "machine_facts",
     "model_digest",
     "now",
     "platform_tag",

@@ -12,7 +12,7 @@
 `setpoint` finds the configuration your hardware can actually hold, by measuring it
 instead of guessing, and remembers the answer.
 
-> **Status: early development.** All seven commands run, and have been used to measure
+> **Status: early development.** All eight commands run, and have been used to measure
 > real hardware. Nothing is published to a package index yet. See [Roadmap](#roadmap).
 
 ---
@@ -203,7 +203,7 @@ Each phase leaves something usable on its own.
 |---|---|---|
 | 0 | Research, ecosystem analysis, positioning | Done |
 | 1 | Budgeter, autotuner, doctor, profile format | In progress |
-| 2 | Daemon, request router for the HTTP APIs local backends already serve, TUI, profile sharing, regression sentinel | Planned |
+| 2 | Runner configuration from measured profiles, live telemetry, profile sharing, regression sentinel | In progress |
 | 3 | Request routing, speculative decoding orchestration, quantization advisor | Planned |
 | 4 | Fast model switching, MoE expert cache policy, KV cache tiering | Planned |
 | 5 | Knowledge layer: measured chunking, retrieval policy, embedding placement, search | Planned |
