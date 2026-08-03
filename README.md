@@ -12,7 +12,7 @@
 `setpoint` finds the configuration your hardware can actually hold, by measuring it
 instead of guessing, and remembers the answer.
 
-> **Status: early development.** All eight commands run, and have been used to measure
+> **Status: early development.** All ten commands run, and have been used to measure
 > real hardware. Nothing is published to a package index yet. See [Roadmap](#roadmap).
 
 ---

@@ -12,10 +12,11 @@ import dataclasses
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
-from . import __version__, budget, doctor, export, tune
+from . import __version__, budget, doctor, export, monitor, tune
 from . import profile as profiles
 from .backend import (
     BINARY_ENV_VAR,
@@ -1009,6 +1010,127 @@ def cmd_export(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+_VERDICT_STYLE = {
+    monitor.Verdict.SPILLING: ("red", "SPILLING"),
+    monitor.Verdict.HEALTHY: ("green", "ok"),
+    monitor.Verdict.IDLE: ("grey", "idle"),
+    monitor.Verdict.UNKNOWN: ("grey", "--"),
+}
+
+
+def _bar(fraction: float | None, width: int = 28) -> str:
+    if fraction is None:
+        return "?" * width
+    filled = max(0, min(width, round(fraction * width)))
+    return "#" * filled + "." * (width - filled)
+
+
+def _render_reading(
+    reading: monitor.Reading, spill: monitor.SpillCheck, notes: list[str], style: Style
+) -> list[str]:
+    lines: list[str] = []
+    used, total = reading.vram_used_bytes, reading.vram_total_bytes
+    share = reading.dedicated_share
+
+    lines.append(style.bold("dedicated"))
+    value = f"{(used or 0) / budget.MIB:.0f} / {(total or 0) / budget.MIB:.0f} MiB"
+    lines.append(f"  [{_bar(share)}]  {value}")
+
+    lines.append("")
+    lines.append(style.bold("shared"))
+    if reading.shared_bytes is None:
+        lines.append(f"  {style.grey('not readable on this machine')}")
+    else:
+        age = reading.shared_age_s or 0.0
+        tail = f"{age:.0f}s old" if age >= 1 else "now"
+        if not reading.shared_confident:
+            tail += ", adapter matched by guess"
+        lines.append(f"  {reading.shared_bytes / budget.MIB:>8.0f} MiB   {style.dim(tail)}")
+
+    bits = []
+    if reading.utilization_pct is not None:
+        bits.append(f"{reading.utilization_pct}% busy")
+    if reading.temperature_c is not None:
+        bits.append(f"{reading.temperature_c} C")
+    if reading.power_w is not None:
+        bits.append(f"{reading.power_w:.0f} W")
+    if bits:
+        lines.append("")
+        lines.append(f"  {style.dim('  '.join(bits))}")
+    if reading.throttle_reasons:
+        lines.append(f"  {style.yellow('throttle: ' + ', '.join(reading.throttle_reasons))}")
+
+    colour, label = _VERDICT_STYLE[spill.verdict]
+    lines.append("")
+    lines.append(f"{getattr(style, colour)(label)}  {spill.detail}")
+    for note in notes:
+        lines.append(style.grey(f"  note: {note}"))
+    return lines
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    """One reading, for a script or a quick look."""
+    style = Style(color_enabled())
+    with monitor.Monitor(args.gpu) as watch:
+        # A spill is a trend, not a value, so even one look samples for a moment. The
+        # shared counter is read on its own thread and takes about two seconds to answer.
+        deadline = time.monotonic() + args.wait
+        reading = watch.tick()
+        while time.monotonic() < deadline:
+            time.sleep(0.5)
+            reading = watch.tick()
+        spill = watch.spill
+        notes = list(watch.notes)
+        if spill.verdict is monitor.Verdict.UNKNOWN:
+            notes.append("a spill shows as a trend; `setpoint top` watches for one over time")
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "vram_used_bytes": reading.vram_used_bytes,
+                    "vram_total_bytes": reading.vram_total_bytes,
+                    "dedicated_share": reading.dedicated_share,
+                    "shared_bytes": reading.shared_bytes,
+                    "shared_age_s": reading.shared_age_s,
+                    "shared_confident": reading.shared_confident,
+                    "utilization_pct": reading.utilization_pct,
+                    "temperature_c": reading.temperature_c,
+                    "power_w": reading.power_w,
+                    "throttle_reasons": list(reading.throttle_reasons),
+                    "verdict": spill.verdict.value,
+                    "detail": spill.detail,
+                    "notes": notes,
+                },
+                indent=2,
+            )
+        )
+    else:
+        for line in _render_reading(reading, spill, notes, style):
+            print(line)
+    return EXIT_PROBLEM if spill.verdict is monitor.Verdict.SPILLING else EXIT_OK
+
+
+def cmd_top(args: argparse.Namespace) -> int:
+    """Redraw until interrupted."""
+    style = Style(color_enabled())
+    spilled = False
+    try:
+        with monitor.Monitor(args.gpu) as watch:
+            while True:
+                reading = watch.tick()
+                spill = watch.spill
+                spilled = spilled or spill.verdict is monitor.Verdict.SPILLING
+                body = _render_reading(reading, spill, list(watch.notes), style)
+                header = style.dim(f"setpoint top -- every {args.interval:.1f}s, Ctrl-C to stop")
+                print("\033[H\033[J" + header + "\n", end="")
+                print("\n".join(body), flush=True)
+                time.sleep(args.interval)
+    except KeyboardInterrupt:
+        print()
+        return EXIT_PROBLEM if spilled else EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="setpoint",
@@ -1194,6 +1316,38 @@ def build_parser() -> argparse.ArgumentParser:
     p_export.add_argument("--gpu", type=int, help="GPU index, when the machine has more than one")
     p_export.add_argument("--device", metavar="NAME", help="accelerator to pin entries to")
     p_export.set_defaults(func=cmd_export)
+
+    p_top = sub.add_parser(
+        "top",
+        help="watch the GPU live, and catch a spill into system RAM",
+        description=(
+            "Redraws until interrupted. Dedicated memory comes from the driver and is "
+            "current; the shared figure comes from the operating system's adapter "
+            "counters, costs about two seconds to read, and its age is shown. Exits 1 "
+            "if a spill was seen."
+        ),
+    )
+    p_top.add_argument(
+        "--interval", type=float, default=1.0, metavar="S", help="seconds between redraws"
+    )
+    p_top.add_argument("--gpu", type=int, help="GPU index, when the machine has more than one")
+    p_top.set_defaults(func=cmd_top)
+
+    p_status = sub.add_parser(
+        "status",
+        help="one reading of what the GPU is doing right now",
+        description="Exits 1 if the readings show a spill into system RAM.",
+    )
+    p_status.add_argument(
+        "--wait",
+        type=float,
+        default=3.0,
+        metavar="S",
+        help="how long to wait for the shared-memory counter, which is slow to read",
+    )
+    p_status.add_argument("--gpu", type=int, help="GPU index, when the machine has more than one")
+    p_status.add_argument("--json", action="store_true", help="emit machine-readable output")
+    p_status.set_defaults(func=cmd_status)
 
     p_profile = sub.add_parser(
         "profile",
