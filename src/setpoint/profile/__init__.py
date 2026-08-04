@@ -6,11 +6,13 @@ another language does not have to read Python to know what to write.
 
 from __future__ import annotations
 
+from .share import adopt, find_model, for_sharing
 from .signature import (
     MachineFacts,
     build_signature,
     describes_machine,
     machine_facts,
+    machine_mismatch,
     model_digest,
     platform_tag,
     signature_id,
@@ -59,14 +61,18 @@ __all__ = [
     "Signature",
     "Summary",
     "Target",
+    "adopt",
     "build_signature",
     "describes_machine",
     "dumps",
     "find",
+    "find_model",
+    "for_sharing",
     "home",
     "load",
     "load_all",
     "machine_facts",
+    "machine_mismatch",
     "model_digest",
     "now",
     "platform_tag",
