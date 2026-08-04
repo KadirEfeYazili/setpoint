@@ -116,6 +116,24 @@ def describes_machine(signature: Signature, facts: MachineFacts) -> bool:
     )
 
 
+def machine_mismatch(signature: Signature, facts: MachineFacts) -> tuple[str, ...]:
+    """Which machine fields differ, in words. `()` means the profile applies here.
+
+    "This profile is for other hardware" is not a useful answer on its own; the field
+    that differs is what tells the user whether to re-measure or to find another card.
+    """
+    differences: list[str] = []
+    for label, theirs, ours in (
+        ("GPU", signature.gpu, facts.gpu),
+        ("VRAM", f"{signature.vram_total_mb} MiB", f"{facts.vram_total_mb} MiB"),
+        ("driver", signature.driver, facts.driver),
+        ("platform", signature.platform, facts.platform),
+    ):
+        if theirs != ours:
+            differences.append(f"{label}: profile says {theirs}, this machine is {ours}")
+    return tuple(differences)
+
+
 def signature_id(signature: Signature) -> str:
     """Stable filename for a signature. A collision here is a signature collision."""
     parts = "\n".join(

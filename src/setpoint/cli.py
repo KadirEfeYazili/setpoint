@@ -31,7 +31,7 @@ from .backend import (
     server_argv,
 )
 from .hardware import probe as probe_hardware
-from .model import ModelError, analyze, resolve
+from .model import ModelError, analyze, local_models, resolve
 from .render import Style, color_enabled, gib, human_bytes, short_path, term_width, wrap
 
 EXIT_OK = 0
@@ -393,6 +393,76 @@ def _config_rows(config: profiles.Config) -> list[tuple[str, str]]:
     return [r for r in rows if r]
 
 
+def _profile_export(args: argparse.Namespace, stored: list, style: Style) -> int:
+    """Write a profile in the form another machine can read."""
+    wanted = [p for p in stored if profiles.signature_id(p.signature).startswith(args.id or "")]
+    if not args.id or len(wanted) != 1:
+        print(
+            f"setpoint: `profile export` needs one profile id; {len(wanted)} matched.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+
+    shareable = profiles.for_sharing(wanted[0])
+    text = profiles.dumps(shareable)
+    if args.out:
+        try:
+            Path(args.out).write_text(text, encoding="utf-8")
+        except OSError as exc:
+            print(f"setpoint: cannot write {args.out}: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+        print(f"wrote {profiles.signature_id(shareable.signature)} to {short_path(args.out)}")
+        print(style.dim("  the file path was removed; the digest identifies the model"))
+    else:
+        print(text, end="")
+    return EXIT_OK
+
+
+def _profile_import(args: argparse.Namespace, style: Style) -> int:
+    """Read a profile from elsewhere, and refuse it unless it describes this machine."""
+    try:
+        incoming = profiles.load(args.id)
+    except profiles.ProfileError as exc:
+        print(f"setpoint: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    snapshot = probe_hardware(include_wddm=False)
+    facts = profiles.machine_facts(snapshot, args.gpu)
+    if facts is None:
+        print("setpoint: this machine's GPU could not be identified.", file=sys.stderr)
+        return EXIT_ERROR
+
+    differences = profiles.machine_mismatch(incoming.signature, facts)
+    if differences:
+        print("setpoint: this profile was not measured on this machine.", file=sys.stderr)
+        for line in differences:
+            print(f"  {line}", file=sys.stderr)
+        return EXIT_PROBLEM
+
+    found = profiles.find_model(incoming, list(local_models()))
+    if found is None:
+        print(
+            "setpoint: this machine does not have the model the profile was measured on.",
+            file=sys.stderr,
+        )
+        print(f"  {incoming.signature.model_digest}", file=sys.stderr)
+        return EXIT_PROBLEM
+
+    adopted = profiles.adopt(incoming, found.path)
+    path = profiles.save(adopted)
+    print(f"imported {profiles.signature_id(adopted.signature)}  {adopted.model.label}")
+    print(f"  matched {found.reference}")
+    print(f"  stored at {short_path(path)}")
+    print()
+    print(
+        style.yellow(
+            "someone else's measurement is not evidence on this machine. Verify it with "
+            f"`setpoint bench {found.reference}`."
+        )
+    )
+    return EXIT_OK
+
+
 def cmd_profile(args: argparse.Namespace) -> int:
     directory = profiles.profiles_dir()
     style = Style(color_enabled())
@@ -401,11 +471,17 @@ def cmd_profile(args: argparse.Namespace) -> int:
         print(directory)
         return EXIT_OK
 
+    if args.action == "import":
+        return _profile_import(args, style)
+
     try:
         stored = profiles.load_all(directory)
     except OSError as exc:
         print(f"setpoint: cannot read {directory}: {exc}", file=sys.stderr)
         return EXIT_ERROR
+
+    if args.action == "export":
+        return _profile_export(args, stored, style)
 
     if args.action == "show":
         wanted = [p for p in stored if profiles.signature_id(p.signature).startswith(args.id)]
@@ -1357,8 +1433,15 @@ def build_parser() -> argparse.ArgumentParser:
             "signature. A profile whose measurement is not reliable is never stored."
         ),
     )
-    p_profile.add_argument("action", choices=("list", "show", "path"), nargs="?", default="list")
-    p_profile.add_argument("id", nargs="?", help="profile id, or any unambiguous prefix")
+    p_profile.add_argument(
+        "action",
+        choices=("list", "show", "path", "export", "import"),
+        nargs="?",
+        default="list",
+    )
+    p_profile.add_argument("id", nargs="?", help="profile id or prefix; a file path for `import`")
+    p_profile.add_argument("--out", metavar="PATH", help="write here instead of stdout, for export")
+    p_profile.add_argument("--gpu", type=int, help="GPU index, when the machine has more than one")
     p_profile.add_argument("--json", action="store_true", help="emit machine-readable output")
     p_profile.set_defaults(func=cmd_profile)
 
