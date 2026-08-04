@@ -40,6 +40,41 @@ def resolve(reference: str) -> ResolvedModel:
     raise ModelError(f"no model file found for {reference!r}")
 
 
+def local_models() -> list[ResolvedModel]:
+    """Every model this machine already has, so one can be found without being named.
+
+    An imported profile carries a digest rather than a path - a path from someone
+    else's machine means nothing here - so adopting it means looking through what is
+    installed for the file it describes.
+    """
+    root = ollama_root() / "manifests"
+    if not root.is_dir():
+        return []
+
+    found: list[ResolvedModel] = []
+    seen: set[Path] = set()
+    for manifest in sorted(root.rglob("*")):
+        if not manifest.is_file():
+            continue
+        reference = _reference_of(manifest, root)
+        try:
+            path = resolve_ollama(reference) if reference else None
+        except ModelError:
+            continue
+        if path is not None and path not in seen:
+            seen.add(path)
+            found.append(ResolvedModel(path, reference or str(manifest), "ollama"))
+    return found
+
+
+def _reference_of(manifest: Path, root: Path) -> str | None:
+    """`.../library/qwen3/8b` -> `registry/library/qwen3:8b`."""
+    parts = manifest.relative_to(root).parts
+    if len(parts) < 2:
+        return None
+    return "/".join(parts[:-1]) + ":" + parts[-1]
+
+
 def ollama_root() -> Path:
     """Where Ollama keeps its manifests and blobs."""
     override = os.environ.get("OLLAMA_MODELS")
