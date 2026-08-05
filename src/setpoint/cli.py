@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import __version__, budget, doctor, export, monitor, tune
+from . import __version__, budget, doctor, export, monitor, sentinel, tune
 from . import profile as profiles
 from .backend import (
     BINARY_ENV_VAR,
@@ -987,6 +987,8 @@ def cmd_bench(args: argparse.Namespace) -> int:
     painted = style.green if within else style.red
     _row(style, "difference", "", painted(f"{drift:+.1%}"))
 
+    comparison = _record_and_compare(profile, now, style)
+
     if args.json:
         print(
             json.dumps(
@@ -997,6 +999,10 @@ def cmd_bench(args: argparse.Namespace) -> int:
                     "difference": drift,
                     "within_tolerance": within,
                     "peak_vram_mb": now.peak_vram_mib,
+                    "verdict": comparison.verdict.value,
+                    "verdict_detail": comparison.detail,
+                    "p_value": comparison.p_value,
+                    "causes": list(comparison.causes),
                 },
                 indent=2,
             )
@@ -1007,16 +1013,56 @@ def cmd_bench(args: argparse.Namespace) -> int:
         for line in wrap(f"note: {now.detail}", term_width() - 2):
             print(style.grey(f"  {line}"))
 
-    if not within:
+    if comparison.actionable or not within:
+        reason = (
+            comparison.detail
+            if comparison.actionable
+            else f"{drift:+.1%} against a {REGRESSION_TOLERANCE:.0%} tolerance"
+        )
         print(
             style.red(
-                f"\nthe profile no longer describes this machine: {drift:+.1%} against a "
-                f"{REGRESSION_TOLERANCE:.0%} tolerance. Re-run `setpoint tune`."
+                f"\nthe profile no longer describes this machine: {reason}. Re-run `setpoint tune`."
             )
         )
         return EXIT_PROBLEM
     print(style.green("\nthe profile still holds"))
     return EXIT_OK
+
+
+def _record_and_compare(
+    profile: profiles.Profile, now: tune.Trial, style: Style
+) -> sentinel.Comparison:
+    """Add this reading to the history and say how it compares with the last one.
+
+    The history is keyed by the model rather than by the whole signature: a driver
+    update changes the signature, and a history that split on that could never show
+    what the driver update cost.
+    """
+    sample = now.run.sample_of(MeasurementKind.DECODE) if now.run else None
+    samples = tuple(sample.throughput.samples) if sample else ()
+    path = sentinel.history_path(profile.signature.model_digest, profile.target.context)
+    previous = sentinel.load(path)
+    causes = sentinel.attribute(previous[-1].signature, profile.signature) if previous else ()
+
+    record = sentinel.record_of(profile, samples, profiles.now(), peak_vram_mb=now.peak_vram_mib)
+    comparison = (
+        sentinel.compare(previous[-1], record, causes)
+        if previous
+        else sentinel.Comparison(
+            sentinel.Verdict.UNKNOWN, "first check for this model; nothing to compare yet"
+        )
+    )
+    try:
+        sentinel.append(path, record)
+    except OSError as exc:
+        print(style.grey(f"  history not written: {exc}"))
+
+    print()
+    _row(style, "against last check", "", comparison.detail)
+    _row(style, "history", f"{len(previous) + 1} checks", short_path(path))
+    for cause in comparison.causes:
+        print(style.yellow(f"  changed since: {cause}"))
+    return comparison
 
 
 def cmd_export(args: argparse.Namespace) -> int:
