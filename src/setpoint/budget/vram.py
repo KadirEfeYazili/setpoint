@@ -10,9 +10,21 @@ from __future__ import annotations
 from ..hardware import GpuStatic, HardwareSnapshot
 from .types import MIB, VramBudget
 
-# Allocators do not pack perfectly, and the last block that "just fits" is the one
-# that spills. Held back as a fraction of free memory.
-DEFAULT_FRAGMENTATION_PCT = 3.0
+# Allocators do not pack perfectly, and the last block that "just fits" is the one that
+# fails. Held back as a fraction of free memory.
+#
+# Measured, not guessed. Two models were probed for the largest -ngl that actually runs
+# and compared against what each margin predicts:
+#
+#            8B (real 28)        7B (real 25)
+#   3%       30, over by 2       26, over by 1
+#   5%       29, over by 1       25, exact
+#   8%       28, exact           24, one block spare
+#
+# 8% is the smallest margin safe on both. Under-reserving means the model does not
+# start; over-reserving costs a block. The refusal that set the boundary was an
+# allocation of 1.7 MiB, so this is allocator exhaustion rather than a missing term.
+DEFAULT_FRAGMENTATION_PCT = 8.0
 
 # The inference process has not started yet, so its CUDA context and compute buffers
 # are absent from the free-memory reading. This is an allowance, not a measurement;

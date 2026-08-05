@@ -124,6 +124,23 @@ class TestKvEstimate:
         assert kv.estimate(model(architecture="deepseek2"), 1024) is None
 
 
+class TestFragmentationMargin:
+    """The default was measured against the boundary, not chosen for roundness."""
+
+    def test_the_default_is_the_measured_one(self):
+        assert vram.DEFAULT_FRAGMENTATION_PCT == 8.0
+
+    def test_it_errs_towards_reserving_too_much(self):
+        # Under-reserving means the model refuses to start; over-reserving costs a block.
+        info = model(block_count=36, block_bytes=115 * MIB)
+        loose = vram.assumed(4 * GIB, fragmentation_pct=3.0)
+        tight = vram.assumed(4 * GIB, fragmentation_pct=8.0)
+        assert (
+            planner.fit(info, None, tight.ceiling_bytes).n_gpu_layers
+            <= planner.fit(info, None, loose.ceiling_bytes).n_gpu_layers
+        )
+
+
 class TestVramBudget:
     def test_the_ceiling_subtracts_every_claim(self):
         result = vram.from_snapshot(
