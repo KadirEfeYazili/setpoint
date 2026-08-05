@@ -765,7 +765,33 @@ def cmd_tune(args: argparse.Namespace) -> int:
         return EXIT_OK
     path = profiles.save(profile)
     print(f"\nwritten to {short_path(path)}")
+    _seed_history(profile, result.best, style)
     return EXIT_OK
+
+
+def _seed_history(profile: profiles.Profile, best: tune.Trial | None, style: Style) -> None:
+    """Keep the winning run's raw repetitions beside the profile.
+
+    A profile stores a summary, which is right for a file people read and edit, but a
+    summary cannot be compared statistically. Without this the sentinel could only ask
+    whether today is within five percent of a number from last week, and a fixed
+    percentage cannot tell a real regression from a busy afternoon.
+    """
+    sample = best.run.sample_of(MeasurementKind.DECODE) if best and best.run else None
+    if sample is None:
+        return
+    history = sentinel.history_path(profile.signature.model_digest, profile.target.context)
+    record = sentinel.record_of(
+        profile,
+        tuple(sample.throughput.samples),
+        profile.measurement.measured_at,
+        peak_vram_mb=profile.measurement.peak_vram_mb,
+        note="written with the profile",
+    )
+    try:
+        sentinel.append(history, record)
+    except OSError as exc:
+        print(style.grey(f"  history not written: {exc}"))
 
 
 def _render_tune_result(
@@ -1013,18 +1039,36 @@ def cmd_bench(args: argparse.Namespace) -> int:
         for line in wrap(f"note: {now.detail}", term_width() - 2):
             print(style.grey(f"  {line}"))
 
-    if comparison.actionable or not within:
-        reason = (
-            comparison.detail
-            if comparison.actionable
-            else f"{drift:+.1%} against a {REGRESSION_TOLERANCE:.0%} tolerance"
-        )
+    # Two questions get asked here and only one of them has good evidence behind it.
+    # Drift against the profile compares today's median with a number from another day;
+    # the sentinel compares repetitions with repetitions. Where the sentinel could run it
+    # is the better answer, and letting the weaker one raise the alarm anyway is how a
+    # monitoring tool teaches people to ignore it.
+    tested = comparison.verdict in (sentinel.Verdict.SAME, sentinel.Verdict.SLOWER)
+    if comparison.actionable:
         print(
             style.red(
-                f"\nthe profile no longer describes this machine: {reason}. Re-run `setpoint tune`."
+                f"\nthis machine has slowed since the last check: {comparison.detail}. "
+                "Re-run `setpoint tune`."
             )
         )
         return EXIT_PROBLEM
+    if not within and not tested:
+        print(
+            style.red(
+                f"\nthe profile no longer describes this machine: {drift:+.1%} against a "
+                f"{REGRESSION_TOLERANCE:.0%} tolerance. Re-run `setpoint tune`."
+            )
+        )
+        return EXIT_PROBLEM
+    if not within:
+        print(
+            style.yellow(
+                f"\nthe profile reads {drift:+.1%} today, but nothing has changed since the "
+                "last check. The profile is stale rather than the machine slower."
+            )
+        )
+        return EXIT_OK
     print(style.green("\nthe profile still holds"))
     return EXIT_OK
 
