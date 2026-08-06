@@ -75,6 +75,7 @@ class Trial:
     detail: str = ""
     run: BenchRun | None = None
     watch: GpuWatch | None = None
+    busy_before_pct: int | None = None
 
     @property
     def usable(self) -> bool:

@@ -9,6 +9,7 @@ label is what lets a reader distinguish a bad configuration from a bad moment.
 
 from __future__ import annotations
 
+import statistics
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +26,15 @@ SETTLE_POLL_S = 2.0
 # Free VRAM moving by this much between the plan and the run is worth saying out loud:
 # on a small card it is the difference of a layer or two.
 DRIFT_NOTICE_BYTES = 64 * 1024 * 1024
+
+# Utilisation read before the run belongs to somebody else, because the backend has not
+# started yet. Idle on a Windows desktop measured 13-16% over 24 samples, and a card
+# genuinely shared with another inference process read 81-88%, so the line sits well
+# clear of both. Above it the run is still taken; it is labelled, because a slowdown
+# caused by a neighbour calls for a different action than a slowdown caused by the
+# machine.
+FOREIGN_LOAD_PCT = 40
+FOREIGN_LOAD_SAMPLES = 5
 
 
 @dataclass
@@ -54,6 +64,7 @@ class BackendMeasure:
         before = wait_until_settled(
             self.gpu_index, timeout_s=SETTLE_TIMEOUT_S if self.wait_for_throttle else 0.0
         )
+        busy = foreign_load(self.gpu_index)
         drift = self.drift()
         spec = run_spec(config, effort, self.model_path, self.devices)
 
@@ -70,6 +81,11 @@ class BackendMeasure:
         notes = list(run.notes)
         if before:
             notes.append(f"The card was throttling before the run started: {', '.join(before)}.")
+        if busy is not None:
+            notes.append(
+                f"The card was already {busy}% busy before the run started, so another "
+                "process is using it."
+            )
         if watch.throttled:
             notes.append(f"The card throttled during the run: {', '.join(watch.throttle_reasons)}.")
         if watch.detail:
@@ -90,6 +106,7 @@ class BackendMeasure:
             detail=" ".join(notes),
             run=run,
             watch=watch,
+            busy_before_pct=busy,
         )
 
     def drift(self) -> str | None:
@@ -203,6 +220,30 @@ def wait_until_settled(
         time.sleep(SETTLE_POLL_S)
         reasons = read_throttle(gpu_index)
     return reasons
+
+
+def foreign_load(gpu_index: int | None = None) -> int | None:
+    """Utilisation belonging to another process, or `None` when the card looks idle.
+
+    Read before the backend starts, so whatever is running is not ours.
+    """
+    readings: list[int] = []
+    try:
+        with NvmlProbe() as probe:
+            if not probe.ok:
+                return None
+            for _ in range(FOREIGN_LOAD_SAMPLES):
+                for sample in probe.sample():
+                    if gpu_index is not None and sample.index != gpu_index:
+                        continue
+                    if sample.utilization_pct is not None:
+                        readings.append(sample.utilization_pct)
+    except Exception:
+        return None
+    if not readings:
+        return None
+    busy = int(statistics.median(readings))
+    return busy if busy >= FOREIGN_LOAD_PCT else None
 
 
 def _measured_side(objective: Objective) -> MeasurementKind:

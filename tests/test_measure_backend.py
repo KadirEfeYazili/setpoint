@@ -13,11 +13,12 @@ from pathlib import Path
 import pytest
 
 from setpoint.backend import BackendBuild, BackendError, BenchRun, BenchSample, MeasurementKind
+from setpoint.hardware.types import GpuSample
 from setpoint.hardware.watch import GpuWatch
 from setpoint.measure import Statistic
 from setpoint.profile import Config, Objective
 from setpoint.tune import Effort
-from setpoint.tune.measure import BackendMeasure, run_spec
+from setpoint.tune.measure import BackendMeasure, foreign_load, run_spec
 
 MODEL = Path("model.gguf")
 EFFORT = Effort(repetitions=5, n_depth=8192, label="full")
@@ -55,6 +56,7 @@ def _quiet_gpu(monkeypatch):
     monkeypatch.setattr("setpoint.tune.measure.read_throttle", lambda *a, **k: ())
     monkeypatch.setattr("setpoint.tune.measure.wait_until_settled", lambda *a, **k: ())
     monkeypatch.setattr("setpoint.tune.measure.GpuWatcher", _watcher(GpuWatch()))
+    monkeypatch.setattr("setpoint.tune.measure.foreign_load", lambda *a, **k: None)
 
 
 def _watcher(result: GpuWatch):
@@ -175,6 +177,50 @@ class TestThermalState:
 
     def test_a_clean_run_is_reliable(self):
         assert measurer()(Config(), EFFORT).reliable
+
+
+class TestSharedCard:
+    """Utilisation read before the run belongs to another process."""
+
+    def _probe(self, pct: int | None):
+        class Probe:
+            ok = True
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def sample(self):
+                return (GpuSample(index=0, utilization_pct=pct),)
+
+        return lambda *a, **k: Probe()
+
+    def test_an_idle_card_reports_nothing(self, monkeypatch):
+        # Idle on a real desktop measured 13-16%, which must not raise the flag.
+        monkeypatch.setattr("setpoint.tune.measure.NvmlProbe", self._probe(16))
+        assert foreign_load(0) is None
+
+    def test_a_shared_card_reports_how_busy_it_was(self, monkeypatch):
+        # A second inference process on the same card measured 81-88%.
+        monkeypatch.setattr("setpoint.tune.measure.NvmlProbe", self._probe(86))
+        assert foreign_load(0) == 86
+
+    def test_an_unreadable_card_reports_nothing(self, monkeypatch):
+        monkeypatch.setattr("setpoint.tune.measure.NvmlProbe", self._probe(None))
+        assert foreign_load(0) is None
+
+    def test_the_trial_carries_the_reading_and_says_so(self, monkeypatch):
+        monkeypatch.setattr("setpoint.tune.measure.foreign_load", lambda *a, **k: 86)
+        trial = measurer()(Config(), EFFORT)
+        assert trial.busy_before_pct == 86
+        assert "another process is using it" in trial.detail
+
+    def test_a_quiet_card_leaves_the_trial_unmarked(self):
+        trial = measurer()(Config(), EFFORT)
+        assert trial.busy_before_pct is None
+        assert "another process" not in trial.detail
 
 
 class TestFailures:

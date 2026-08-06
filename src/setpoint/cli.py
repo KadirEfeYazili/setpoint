@@ -1047,12 +1047,24 @@ def cmd_bench(args: argparse.Namespace) -> int:
     # monitoring tool teaches people to ignore it.
     tested = comparison.verdict in (sentinel.Verdict.SAME, sentinel.Verdict.SLOWER)
     if comparison.actionable:
-        print(
-            style.red(
-                f"\nthis machine has slowed since the last check: {comparison.detail}. "
-                "Re-run `setpoint tune`."
+        # Re-tuning is the wrong advice when the card was already shared: the search
+        # would measure the neighbour's load and write it into the profile as if it
+        # were this machine's ceiling.
+        if now.busy_before_pct is not None:
+            print(
+                style.red(
+                    f"\nthis run was slower: {comparison.detail}. The card was already "
+                    f"{now.busy_before_pct}% busy before it started, so find out what else "
+                    "is using it before re-tuning."
+                )
             )
-        )
+        else:
+            print(
+                style.red(
+                    f"\nthis machine has slowed since the last check: {comparison.detail}. "
+                    "Re-run `setpoint tune`."
+                )
+            )
         return EXIT_PROBLEM
     if not within and not tested:
         print(
