@@ -6,8 +6,9 @@ they are worth two layers.
 
 These numbers were measured, not assumed. The dominant term turned out to be the output
 logits buffer, which is sized by the vocabulary and the microbatch and does not care how
-large the model is: doubling the embedding width left the per-token cost unchanged. The
-readings and the method are in the phase notes.
+large the model is: doubling the embedding width left the per-token cost unchanged, and a
+model with 1.73 times the vocabulary moved the per-token cost by 1.69. The readings and
+the method are in the phase notes.
 """
 
 from __future__ import annotations
@@ -25,7 +26,14 @@ LOGITS_BYTES_PER_VOCAB = 4
 GRAPH_BYTES_PER_EMBEDDING = 14
 
 # Whatever does not scale: driver context and allocator bookkeeping.
-BASE_BYTES = 8 * MIB
+#
+# Fitted at 8 MiB, then re-measured with a per-run baseline across nine points on two
+# architectures. The residual above the per-token terms sat between 10 and 19 MiB with no
+# dependence on the microbatch, so the constant was too small and the estimate fell below
+# the real peak. 24 MiB clears the worst point with room for the sampling noise. The cost
+# is checked: at the offload boundary this machine actually measured, 89 MiB went unspent
+# against a 109 MiB block, so the larger constant does not lose a layer.
+BASE_BYTES = 24 * MIB
 
 # llama.cpp's default microbatch, and what the budget assumes unless told otherwise.
 DEFAULT_UBATCH = 512
@@ -34,7 +42,7 @@ DEFAULT_UBATCH = 512
 FALLBACK_BYTES = 320 * MIB
 
 # The hardware and backend the constants above were fitted on.
-CALIBRATION = "Vulkan, GTX 1650, two Qwen models"
+CALIBRATION = "Vulkan, GTX 1650, qwen2 and gemma3 (152k/262k vocab)"
 
 
 @dataclass(frozen=True)

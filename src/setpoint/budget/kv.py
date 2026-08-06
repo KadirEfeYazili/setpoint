@@ -63,7 +63,8 @@ def estimate(
     if upper_bound:
         notes.append(
             f"Sliding-window blocks hold at most {window} tokens, so the real cache is "
-            "smaller than this figure."
+            "smaller than this figure. On the one such model measured here it was five "
+            "times smaller: the file names the window but not which blocks use it."
         )
     if {cache_type_k, cache_type_v} & QUANTIZED_CACHE_TYPES:
         notes.append("A quantized KV cache requires flash attention to be enabled.")

@@ -60,18 +60,32 @@ class TestShape:
 
 
 class TestAgainstMeasurements:
-    """Values read off a GTX 1650 running the Vulkan backend."""
+    """Peak VRAM read off a GTX 1650 on the Vulkan backend, full offload.
 
-    @pytest.mark.parametrize(("ubatch", "measured_mib"), [(128, 84), (256, 162), (512, 318)])
-    def test_it_matches_what_the_card_actually_used(self, ubatch, measured_mib):
-        predicted = overhead.runtime_allowance(model(), ubatch).total_bytes / MIB
-        assert predicted == pytest.approx(measured_mib, abs=5)
+    Two architectures with different vocabularies, each measured against a baseline taken
+    immediately before the run, because the desktop's own VRAM use drifts.
+    """
 
-    def test_it_errs_towards_reserving_too_much(self):
-        # Under-reserving spills into system RAM; over-reserving only costs a layer.
-        for ubatch, measured in ((128, 84), (256, 162), (512, 318)):
-            predicted = overhead.runtime_allowance(model(), ubatch).total_bytes / MIB
-            assert predicted >= measured
+    QWEN = (model(vocab=151936, embedding=2048), [(128, 92), (256, 166), (512, 322)])
+    GEMMA = (model(vocab=262144, embedding=1152), [(128, 149), (256, 274), (512, 534)])
+
+    @pytest.mark.parametrize("case", [QWEN, GEMMA], ids=["qwen2-152k", "gemma3-262k"])
+    def test_it_reserves_more_than_the_card_used_but_not_much_more(self, case):
+        # One-sided on purpose. Under-reserving spills into system RAM or refuses to
+        # start; over-reserving only risks a layer, so the band is asymmetric.
+        info, readings = case
+        for ubatch, measured in readings:
+            predicted = overhead.runtime_allowance(info, ubatch).total_bytes / MIB
+            assert 0 <= predicted - measured <= 20
+
+    def test_the_per_token_slope_tracks_the_vocabulary_across_the_two_models(self):
+        # The discriminating measurement: 1.73 times the vocabulary moved the measured
+        # slope by 1.69, which the embedding term cannot account for.
+        slopes = []
+        for info, _ in (self.QWEN, self.GEMMA):
+            allowance = overhead.runtime_allowance(info, 512)
+            slopes.append((allowance.total_bytes - overhead.BASE_BYTES) / 512)
+        assert slopes[1] / slopes[0] == pytest.approx(1.69, abs=0.05)
 
 
 class TestUnknownModel:
