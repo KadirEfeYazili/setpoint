@@ -251,11 +251,12 @@ def _render_budget(
             "desktop usage drifting by this much moves the plan",
         )
 
-    left_behind = (
-        "the token embedding, which llama.cpp keeps in RAM"
-        if offload.fits_fully
-        else f"{offload.cpu_weight_fraction:.0%} of the model"
-    )
+    if not offload.fits_fully:
+        left_behind = f"{offload.cpu_weight_fraction:.0%} of the model"
+    elif offload.cpu_bytes:
+        left_behind = "the token embedding, which llama.cpp keeps in RAM"
+    else:
+        left_behind = "nothing; this model ties its embedding to the output"
     _row(style, "on cpu", gib(offload.cpu_bytes), left_behind)
 
     if plan.alternatives:
