@@ -36,6 +36,13 @@ DRIFT_NOTICE_BYTES = 64 * 1024 * 1024
 FOREIGN_LOAD_PCT = 40
 FOREIGN_LOAD_SAMPLES = 5
 
+# NVML reports utilisation averaged over roughly the last second, so a reading taken
+# straight after a run of our own still contains that run. Measured: a clean card read
+# 73% right after the warm-up finished. A busy reading is therefore given time to decay
+# before it is believed; a real neighbour keeps the card busy and outlasts the wait.
+FOREIGN_LOAD_TIMEOUT_S = 4.0
+FOREIGN_LOAD_POLL_S = 0.5
+
 
 @dataclass
 class BackendMeasure:
@@ -225,8 +232,22 @@ def wait_until_settled(
 def foreign_load(gpu_index: int | None = None) -> int | None:
     """Utilisation belonging to another process, or `None` when the card looks idle.
 
-    Read before the backend starts, so whatever is running is not ours.
+    A busy reading has to survive `FOREIGN_LOAD_TIMEOUT_S` to count, which is what
+    separates a neighbour from the tail of our own previous run. A quiet card costs
+    nothing: the first reading settles it.
     """
+    deadline = time.monotonic() + FOREIGN_LOAD_TIMEOUT_S
+    busy = _utilisation(gpu_index)
+    while busy is not None and busy >= FOREIGN_LOAD_PCT and time.monotonic() < deadline:
+        time.sleep(FOREIGN_LOAD_POLL_S)
+        busy = _utilisation(gpu_index)
+    if busy is None or busy < FOREIGN_LOAD_PCT:
+        return None
+    return busy
+
+
+def _utilisation(gpu_index: int | None) -> int | None:
+    """Median of a short burst of utilisation readings, or `None` if unreadable."""
     readings: list[int] = []
     try:
         with NvmlProbe() as probe:
@@ -240,10 +261,7 @@ def foreign_load(gpu_index: int | None = None) -> int | None:
                         readings.append(sample.utilization_pct)
     except Exception:
         return None
-    if not readings:
-        return None
-    busy = int(statistics.median(readings))
-    return busy if busy >= FOREIGN_LOAD_PCT else None
+    return int(statistics.median(readings)) if readings else None
 
 
 def _measured_side(objective: Objective) -> MeasurementKind:

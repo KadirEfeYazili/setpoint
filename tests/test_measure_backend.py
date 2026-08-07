@@ -182,7 +182,10 @@ class TestThermalState:
 class TestSharedCard:
     """Utilisation read before the run belongs to another process."""
 
-    def _probe(self, pct: int | None):
+    def _probe(self, *readings: int | None):
+        """A probe that walks through `readings`, repeating the last one."""
+        queue = list(readings)
+
         class Probe:
             ok = True
 
@@ -193,19 +196,32 @@ class TestSharedCard:
                 return False
 
             def sample(self):
+                pct = queue.pop(0) if len(queue) > 1 else queue[0]
                 return (GpuSample(index=0, utilization_pct=pct),)
 
         return lambda *a, **k: Probe()
+
+    @pytest.fixture(autouse=True)
+    def _no_waiting(self, monkeypatch):
+        monkeypatch.setattr("setpoint.tune.measure.FOREIGN_LOAD_TIMEOUT_S", 0.05)
+        monkeypatch.setattr("setpoint.tune.measure.FOREIGN_LOAD_POLL_S", 0.01)
+        monkeypatch.setattr("setpoint.tune.measure.FOREIGN_LOAD_SAMPLES", 1)
 
     def test_an_idle_card_reports_nothing(self, monkeypatch):
         # Idle on a real desktop measured 13-16%, which must not raise the flag.
         monkeypatch.setattr("setpoint.tune.measure.NvmlProbe", self._probe(16))
         assert foreign_load(0) is None
 
-    def test_a_shared_card_reports_how_busy_it_was(self, monkeypatch):
-        # A second inference process on the same card measured 81-88%.
+    def test_a_card_busy_for_the_whole_wait_is_reported(self, monkeypatch):
+        # A second inference process on the same card measured 81-88% and stays there.
         monkeypatch.setattr("setpoint.tune.measure.NvmlProbe", self._probe(86))
         assert foreign_load(0) == 86
+
+    def test_the_tail_of_our_own_run_is_not_reported(self, monkeypatch):
+        # NVML averages over about a second, so a reading taken straight after our own
+        # warm-up still contains it. Measured: 73% on a card nothing else was using.
+        monkeypatch.setattr("setpoint.tune.measure.NvmlProbe", self._probe(73, 14))
+        assert foreign_load(0) is None
 
     def test_an_unreadable_card_reports_nothing(self, monkeypatch):
         monkeypatch.setattr("setpoint.tune.measure.NvmlProbe", self._probe(None))
