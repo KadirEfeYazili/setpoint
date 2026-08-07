@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import __version__, budget, doctor, export, monitor, sentinel, tune
+from . import __version__, budget, doctor, export, monitor, sentinel, speculate, tune
 from . import profile as profiles
 from .backend import (
     BINARY_ENV_VAR,
@@ -379,6 +379,8 @@ def _config_rows(config: profiles.Config) -> list[tuple[str, str]]:
     rows = [("-ngl", str(config.n_gpu_layers)) if config.n_gpu_layers is not None else None]
     if config.n_cpu_moe is not None:
         rows.append(("-ncmoe", str(config.n_cpu_moe)))
+    if config.spec_type:
+        rows.append(("speculator", config.spec_type))
     rows.append(("kv cache", f"{config.cache_type_k}/{config.cache_type_v}"))
     if config.flash_attn is not None:
         rows.append(("flash attention", "on" if config.flash_attn else "off"))
@@ -1096,6 +1098,159 @@ def cmd_bench(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_spec(args: argparse.Namespace) -> int:
+    """Measure whether speculative decoding pays here, and for which kind of work."""
+    style = Style(color_enabled())
+    profile, model, snapshot, code = _stored_profile(args, style)
+    if profile is None:
+        return code
+
+    backend = LlamaCppBackend()
+    try:
+        listing = backend.devices()
+    except BackendError as exc:
+        print(f"setpoint: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    chosen = select_device(listing, args.device or profile.signature.gpu)
+    if chosen is None or not _same_card(chosen.name, profile.signature.gpu):
+        print(
+            f"setpoint: this profile describes {profile.signature.gpu}, which the backend "
+            "does not offer right now.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+
+    speculators = tuple(args.speculators) if args.speculators else speculate.DRAFT_FREE
+    print(style.bold("model"))
+    print(f"  {profiles.signature_id(profile.signature)}   {profile.model.label}")
+    print(f"  {style.dim('measuring on ' + chosen.id + ' -- ' + chosen.name)}")
+    print(
+        style.dim(
+            f"  {len(speculators)} speculator(s), none of which needs a draft model, "
+            "so none costs VRAM"
+        )
+    )
+
+    try:
+        report = speculate.measure(
+            model_path=profile.model.path or model.path,
+            config=profile.config,
+            context=profile.target.context,
+            devices=(chosen.id,),
+            speculators=speculators,
+            runs=args.repetitions,
+            max_tokens=args.tokens,
+        )
+    except BackendError as exc:
+        print(f"setpoint: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    for result in report.results:
+        _render_workload(result, style)
+
+    if args.json:
+        print(json.dumps(_spec_mapping(report), indent=2))
+
+    print(style.bold("\nverdict"))
+    winners = report.winners
+    if not any(winners.values()):
+        print("  nothing here is worth turning on; the baseline stands")
+        return EXIT_OK
+    if report.agreed:
+        print(f"  {report.agreed} won every workload measured")
+    else:
+        # The disagreement is the finding. Picking one would hide a factor of twenty.
+        print("  it depends on the work, so there is no single setting for this machine:")
+        for name, pick in winners.items():
+            print(f"    {name:<8}{pick or 'nothing worth turning on'}")
+
+    best_pair = max(
+        (
+            (result.gain(result.best) or 0, result.best)
+            for result in report.results
+            if result.best is not None
+        ),
+        default=(0.0, None),
+    )
+    best = best_pair[1]
+    if best is not None:
+        print(style.dim(f"\n  turn it on with: --spec-type {best.speculator}"))
+        if args.write:
+            updated = dataclasses.replace(
+                profile, config=dataclasses.replace(profile.config, spec_type=best.speculator)
+            )
+            path = profiles.save(updated)
+            print(f"  written to {short_path(path)}")
+            print(style.dim("  `setpoint export` will now carry it into the runner config"))
+        else:
+            print(style.dim("  or store it in the profile with --write"))
+    return EXIT_OK
+
+
+def _render_workload(result: speculate.WorkloadResult, style: Style) -> None:
+    print(style.bold(f"\n{result.workload.name}"), style.dim(result.workload.about))
+    print(
+        f"  {'speculator':<16}{'drafted':>9}{'accepted':>10}{'accept':>8}"
+        f"{'tok/step':>10}{'t/s':>9}{'spread':>8}{'vs base':>10}"
+    )
+    for trial in result.trials:
+        _render_trial(result, trial, style)
+    base = result.baseline.throughput
+    spread = f"{base.spread:.1%}" if base.spread is not None else "-"
+    median = f"{base.median:.2f}" if base.median is not None else "-"
+    print(f"  {'none':<16}{'-':>9}{'-':>10}{'-':>8}{1.00:>10.2f}{median:>9}{spread:>8}")
+
+
+def _render_trial(result: speculate.WorkloadResult, trial: speculate.Trial, style: Style) -> None:
+    if trial.throughput.median is None:
+        print(f"  {trial.speculator:<16}   {style.grey(trial.detail or 'no measurement')}")
+        return
+    gain = result.gain(trial)
+    accept = f"{trial.acceptance:.0%}" if trial.acceptance is not None else "-"
+    per_step = f"{trial.tokens_per_step:.2f}" if trial.tokens_per_step is not None else "-"
+    spread = f"{trial.throughput.spread:.1%}" if trial.throughput.spread is not None else "-"
+    shown = f"{gain:+.1%}" if gain is not None else "-"
+    painted = style.green if (gain or 0) > speculate.MIN_WORTH else style.dim
+    line = (
+        f"  {trial.speculator:<16}{trial.drafted:>9}{trial.accepted:>10}{accept:>8}"
+        f"{per_step:>10}{trial.throughput.median:>9.2f}{spread:>8}"
+    )
+    print(f"{line}{painted(shown):>10}")
+    if not trial.reliable and trial.throughput.runs:
+        print(style.grey(f"  {'':<16}unreliable: the spread is above the 5% a profile may carry"))
+
+
+def _spec_mapping(report: speculate.Report) -> dict[str, Any]:
+    return {
+        "model": report.model,
+        "workloads": [
+            {
+                "name": result.workload.name,
+                "about": result.workload.about,
+                "baseline_tok_s": result.baseline.throughput.median,
+                "best": result.best.speculator if result.best else None,
+                "trials": [
+                    {
+                        "speculator": trial.speculator,
+                        "drafted": trial.drafted,
+                        "accepted": trial.accepted,
+                        "acceptance": trial.acceptance,
+                        "tokens_per_step": trial.tokens_per_step,
+                        "tok_s": trial.throughput.median,
+                        "spread": trial.throughput.spread,
+                        "reliable": trial.reliable,
+                        "gain": result.gain(trial),
+                    }
+                    for trial in result.trials
+                ],
+            }
+            for result in report.results
+        ],
+        "winners": report.winners,
+        "agreed": report.agreed,
+    }
+
+
 def _record_and_compare(
     profile: profiles.Profile, now: tune.Trial, style: Style
 ) -> sentinel.Comparison:
@@ -1485,6 +1640,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_bench.add_argument("--json", action="store_true", help="emit machine-readable output")
     p_bench.set_defaults(func=cmd_bench)
+
+    p_spec = sub.add_parser(
+        "spec",
+        help="measure whether speculative decoding pays on this machine",
+        description=(
+            "Speculation only wins when the target model accepts enough of each draft. "
+            "How much it accepts depends on the kind of work, so every speculator is "
+            "measured on more than one workload and the answer may differ between them."
+        ),
+    )
+    p_spec.add_argument("model", help="path to a .gguf file, or an Ollama model name")
+    p_spec.add_argument(
+        "-c", "--context", type=int, help="pick the profile measured for this context"
+    )
+    p_spec.add_argument("--device", metavar="NAME", help="accelerator to measure on")
+    p_spec.add_argument(
+        "--speculators",
+        nargs="+",
+        metavar="NAME",
+        help="which to try; the default is every draft-free one",
+    )
+    p_spec.add_argument(
+        "--repetitions", type=int, default=3, metavar="N", help="requests per measurement"
+    )
+    p_spec.add_argument(
+        "--tokens",
+        type=int,
+        default=speculate.DEFAULT_MAX_TOKENS,
+        metavar="N",
+        help="tokens generated per request",
+    )
+    p_spec.add_argument("--write", action="store_true", help="store the winner in the profile")
+    p_spec.add_argument("--json", action="store_true", help="emit machine-readable output")
+    p_spec.set_defaults(func=cmd_spec)
 
     p_export = sub.add_parser(
         "export",

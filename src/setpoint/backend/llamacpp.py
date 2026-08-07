@@ -248,6 +248,7 @@ def server_argv(
         ("--batch-size", getattr(config, "batch_size", None)),
         ("--ubatch-size", getattr(config, "ubatch_size", None)),
         ("--threads", getattr(config, "threads", None)),
+        ("--spec-type", getattr(config, "spec_type", None)),
     )
     for flag, value in pairs:
         if value is not None:
