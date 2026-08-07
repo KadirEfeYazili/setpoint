@@ -688,6 +688,15 @@ def cmd_tune(args: argparse.Namespace) -> int:
             style.yellow(f"  that is not {vram.gpu_name}, so this run cannot back a profile for it")
         )
 
+    # The expert axis is off unless asked for. Measured on a MoE model where the experts
+    # are 94% of every block: at equal VRAM, moving them to the CPU ran 35-44% slower
+    # than keeping fewer whole blocks on the GPU, because each affected block then costs
+    # a round trip instead of one contiguous split. Searching it by default would spend
+    # measurements on a move that lost every time it was tried.
+    if args.ncmoe is not None and not model.is_moe:
+        print(style.yellow("  --ncmoe only applies to MoE models; ignoring it"))
+        args.ncmoe = None
+
     seeds = [
         profiles.Config(
             n_gpu_layers=candidate.n_gpu_layers,
@@ -695,6 +704,7 @@ def cmd_tune(args: argparse.Namespace) -> int:
             cache_type_v=candidate.cache_type_v,
             flash_attn=candidate.flash_attn,
             ubatch_size=args.ubatch,
+            n_cpu_moe=args.ncmoe,
         )
         for candidate in plan.candidates
     ]
@@ -1409,6 +1419,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_tune.add_argument(
         "--reserve", type=int, default=0, metavar="MB", help="VRAM to keep free for yourself"
+    )
+    p_tune.add_argument(
+        "--ncmoe",
+        type=int,
+        metavar="N",
+        help="MoE models only: start the search with the experts of N blocks on the CPU. "
+        "Off unless asked for, because it measured slower than simply keeping fewer "
+        "blocks on the GPU",
     )
     p_tune.add_argument(
         "--repetitions", type=int, default=5, metavar="N", help="runs per final measurement"
