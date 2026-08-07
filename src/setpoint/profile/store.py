@@ -225,6 +225,7 @@ def _config_mapping(config: Config) -> dict[str, Any]:
     return {
         "n_gpu_layers": config.n_gpu_layers,
         "n_cpu_moe": config.n_cpu_moe,
+        "spec_type": config.spec_type,
         "cache_type_k": config.cache_type_k,
         "cache_type_v": config.cache_type_v,
         "flash_attn": config.flash_attn,
@@ -284,6 +285,7 @@ def _read_config(raw: Any) -> Config:
     return Config(
         n_gpu_layers=raw.get("n_gpu_layers"),
         n_cpu_moe=raw.get("n_cpu_moe"),
+        spec_type=raw.get("spec_type"),
         cache_type_k=raw.get("cache_type_k") or "f16",
         cache_type_v=raw.get("cache_type_v") or "f16",
         flash_attn=raw.get("flash_attn"),

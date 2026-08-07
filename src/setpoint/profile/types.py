@@ -118,6 +118,9 @@ class Config:
 
     n_gpu_layers: int | None = None
     n_cpu_moe: int | None = None
+    # Named speculator, when one was measured to help. Draft-free strategies cost no
+    # VRAM, so this can be set on a configuration that is already at the card's limit.
+    spec_type: str | None = None
     cache_type_k: str = "f16"
     cache_type_v: str = "f16"
     flash_attn: bool | None = None
