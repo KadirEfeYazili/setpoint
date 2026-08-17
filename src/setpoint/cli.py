@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import __version__, budget, doctor, export, monitor, sentinel, speculate, tune
+from . import __version__, budget, doctor, export, monitor, route, sentinel, speculate, tune
 from . import profile as profiles
 from .backend import (
     BINARY_ENV_VAR,
@@ -1098,6 +1098,132 @@ def cmd_bench(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_route(args: argparse.Namespace) -> int:
+    """Say which measured model should answer, once the switch is paid for."""
+    style = Style(color_enabled())
+    snapshot = probe_hardware(include_wddm=False)
+    card = snapshot.gpus[0].name if snapshot.gpus else None
+    stored = [p for p in profiles.load_all() if p.signature.gpu == card]
+    if not stored:
+        print("no profiles measured on this card yet. `setpoint tune <model>` writes one.")
+        return EXIT_OK
+
+    candidates = []
+    for profile in stored:
+        cost = route.read_load(profile.signature.model_digest)
+        if cost is None and args.measure:
+            cost = _measure_switch(profile, style)
+        candidates.append(
+            route.Candidate(
+                name=_route_label(profile),
+                decode_tok_s=profile.measurement.decode_tok_s.median or 0.0,
+                load_seconds=cost.median if cost else None,
+                resident=_is_resident(profile, args.resident),
+                context=profile.target.context,
+            )
+        )
+
+    plan = route.plan(args.tokens, tuple(candidates))
+    print(style.bold("request"))
+    print(f"  {args.tokens} output tokens")
+    print(
+        style.dim("  decode only; prompt processing depends on a prompt this command was not given")
+    )
+
+    print(style.bold("\ncandidates"))
+    print(f"  {'model':<{_ROUTE_LABEL_WIDTH}}{'decode':>10}{'switch':>10}{'total':>10}")
+    for choice in sorted(plan.choices, key=lambda c: c.total_seconds):
+        mark = "  <- loaded" if choice.candidate.resident else ""
+        line = (
+            f"  {choice.candidate.name:<{_ROUTE_LABEL_WIDTH}}"
+            f"{choice.candidate.decode_tok_s:>7.2f} t/s"
+            f"{choice.switch_seconds:>9.2f}s{choice.total_seconds:>9.2f}s"
+        )
+        print(f"{line}{style.dim(mark)}")
+    for candidate in plan.unusable:
+        why = "no switch cost measured; run with --measure"
+        print(f"  {candidate.name:<{_ROUTE_LABEL_WIDTH}}{style.grey(why)}")
+
+    best = plan.best
+    if best is None:
+        print(style.yellow("\nnothing can be costed yet"))
+        return EXIT_OK
+
+    print(style.bold("\ndecision"))
+    print(f"  {best.candidate.name}   {best.total_seconds:.2f}s")
+    saved = plan.saved_seconds
+    if saved is not None and saved > 0:
+        print(style.dim(f"  saves {saved:.2f}s against staying on the loaded model"))
+    elif plan.resident is not None and plan.resident is best:
+        print(style.dim("  already loaded, so nothing is paid for a switch"))
+    if plan.switch_changed_the_answer and plan.fastest is not None:
+        print(
+            style.dim(
+                f"  throughput alone would have picked {plan.fastest.candidate.name}, "
+                f"which costs {plan.fastest.total_seconds:.2f}s once the switch is counted"
+            )
+        )
+
+    if args.json:
+        print(json.dumps(_route_mapping(plan), indent=2))
+    return EXIT_OK
+
+
+# Long enough for a model name and its context, short enough to keep the columns
+# readable in a default terminal.
+_ROUTE_LABEL_WIDTH = 26
+
+
+def _route_label(profile: profiles.Profile) -> str:
+    label = f"{profile.model.label} c{profile.target.context}"
+    return label if len(label) <= _ROUTE_LABEL_WIDTH else label[: _ROUTE_LABEL_WIDTH - 1] + "~"
+
+
+def _is_resident(profile: profiles.Profile, resident: str | None) -> bool:
+    if not resident:
+        return False
+    needle = resident.lower()
+    return needle in _route_label(profile).lower() or needle in (profile.model.label or "").lower()
+
+
+def _measure_switch(profile: profiles.Profile, style: Style) -> route.LoadCost | None:
+    """Time the load for one profile and keep it, so the next run does not pay again."""
+    path = profile.model.path
+    if not path:
+        return None
+    print(style.dim(f"  measuring the switch cost for {profile.model.label}"))
+    cost = route.measure_load(
+        model_path=path,
+        config=profile.config,
+        context=profile.target.context,
+        model_digest=profile.signature.model_digest,
+    )
+    if cost is None:
+        return None
+    route.save_load(cost)
+    return cost
+
+
+def _route_mapping(plan: route.Plan) -> dict[str, Any]:
+    return {
+        "tokens": plan.tokens,
+        "candidates": [
+            {
+                "model": choice.candidate.name,
+                "decode_tok_s": choice.candidate.decode_tok_s,
+                "switch_seconds": choice.switch_seconds,
+                "total_seconds": choice.total_seconds,
+                "resident": choice.candidate.resident,
+            }
+            for choice in plan.choices
+        ],
+        "uncosted": [c.name for c in plan.unusable],
+        "decision": plan.best.candidate.name if plan.best else None,
+        "saved_seconds": plan.saved_seconds,
+        "switch_changed_the_answer": plan.switch_changed_the_answer,
+    }
+
+
 def cmd_spec(args: argparse.Namespace) -> int:
     """Measure whether speculative decoding pays here, and for which kind of work."""
     style = Style(color_enabled())
@@ -1640,6 +1766,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_bench.add_argument("--json", action="store_true", help="emit machine-readable output")
     p_bench.set_defaults(func=cmd_bench)
+
+    p_route = sub.add_parser(
+        "route",
+        help="say which measured model should answer, once the switch is paid for",
+        description=(
+            "Costs every profile measured on this card for a request of a given length, "
+            "counting what it takes to load a model that is not already up. Prints the "
+            "decision and its arithmetic; it does not serve requests."
+        ),
+    )
+    p_route.add_argument(
+        "--tokens", type=int, default=200, metavar="N", help="output tokens to cost for"
+    )
+    p_route.add_argument(
+        "--resident", metavar="MODEL", help="which model is already loaded, if any"
+    )
+    p_route.add_argument(
+        "--measure",
+        action="store_true",
+        help="measure and store the switch cost for any model that has none",
+    )
+    p_route.add_argument("--json", action="store_true", help="emit machine-readable output")
+    p_route.set_defaults(func=cmd_route)
 
     p_spec = sub.add_parser(
         "spec",
