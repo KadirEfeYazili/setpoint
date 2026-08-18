@@ -1727,7 +1727,13 @@ def cmd_export(args: argparse.Namespace) -> int:
     ]
     if devices:
         header.append(f"Pinned to {'/'.join(devices)} because more than one is offered.")
-    text = export.render(entries, header)
+    if args.target == "llama-server":
+        # The engine's own router assigns the port and starts the process, so the
+        # preset carries settings only.
+        header.append("Pass this with --models-preset.")
+        text = export.llamaserver.render(entries, header)
+    else:
+        text = export.render(entries, header)
 
     if args.out:
         try:
@@ -2150,7 +2156,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_export.add_argument(
         "--target",
         default="llama-swap",
-        choices=("llama-swap",),
+        choices=("llama-swap", "llama-server"),
         help="which runner the configuration is for",
     )
     p_export.add_argument("--out", metavar="PATH", help="write here instead of stdout")
