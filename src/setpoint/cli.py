@@ -16,7 +16,18 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import __version__, budget, doctor, export, monitor, route, sentinel, speculate, tune
+from . import (
+    __version__,
+    budget,
+    doctor,
+    export,
+    monitor,
+    quant,
+    route,
+    sentinel,
+    speculate,
+    tune,
+)
 from . import profile as profiles
 from .backend import (
     BINARY_ENV_VAR,
@@ -1098,6 +1109,264 @@ def cmd_bench(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_quant(args: argparse.Namespace) -> int:
+    """Compare the local quantizations of one model on speed, size and drift."""
+    style = Style(color_enabled())
+    try:
+        resolved = resolve(args.model)
+        target = analyze(resolved.path)
+    except ModelError as exc:
+        print(f"setpoint: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    variants = quant.find_variants(target)
+    if len(variants) < 2:
+        print("only one local quantization of this model, so there is nothing to compare.")
+        print(style.dim("  pull another one, then run this again"))
+        return EXIT_OK
+
+    snapshot = probe_hardware(include_wddm=False)
+    backend = LlamaCppBackend()
+    try:
+        listing = backend.devices()
+    except BackendError as exc:
+        print(f"setpoint: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    card = snapshot.gpus[0].name if snapshot.gpus else None
+    chosen = select_device(listing, args.device or card)
+    devices = (chosen.id,) if chosen else ()
+
+    print(style.bold("model"))
+    print(f"  {args.model}   {style.dim(_quant_shape(target))}")
+    print(style.dim(f"  {len(variants)} local quantizations, most precise first"))
+
+    print(style.bold("\nspeed and size"), style.dim(f"at {args.context} tokens of context"))
+    print(f"  {'variant':<26}{'bpw':>6}{'file':>9}{'decode':>12}{'spread':>8}{'peak vram':>12}")
+    speeds = {}
+    warmed = False
+    for variant in variants:
+        trial = _measure_variant(variant, backend, devices, args, warm_up=not warmed)
+        warmed = True
+        speeds[variant.reference] = trial
+        _render_variant_speed(variant, trial, style)
+
+    quality_note = _run_quality(variants, args, devices, style)
+
+    print(style.bold("\ndecision"))
+    _render_quant_decision(variants, speeds, quality_note, style)
+
+    if args.json:
+        print(json.dumps(_quant_mapping(variants, speeds, quality_note), indent=2))
+    return EXIT_OK
+
+
+def _quant_shape(target: object) -> str:
+    return (
+        f"{target.architecture} {target.parameter_label}, "
+        f"{target.block_count} blocks, vocab {target.vocab_size}"
+    )
+
+
+def _quant_label(reference: str) -> str:
+    """Ollama references carry a registry prefix that says nothing here."""
+    return reference.rsplit("/", 1)[-1]
+
+
+def _measure_variant(
+    variant: quant.Variant,
+    backend: LlamaCppBackend,
+    devices: tuple[str, ...],
+    args: argparse.Namespace,
+    warm_up: bool,
+) -> tune.Trial:
+    measure = tune.BackendMeasure(
+        backend=backend,
+        model_path=variant.path,
+        devices=devices,
+    )
+    config = profiles.Config(
+        n_gpu_layers=variant.info.block_count + 1,
+        ubatch_size=args.ubatch,
+        flash_attn=True,
+    )
+    effort = tune.Effort(repetitions=args.repetitions, n_depth=args.context, label="quant")
+    if warm_up:
+        # The card ramps its clocks over the first minute, and the first variant
+        # measured would otherwise carry that cost alone.
+        measure(config, tune.Effort(repetitions=1, n_depth=args.context, label="warmup"))
+    return measure(config, effort)
+
+
+def _render_variant_speed(variant: quant.Variant, trial: tune.Trial, style: Style) -> None:
+    label = _quant_label(variant.reference)
+    bpw = f"{variant.bits_per_weight:.2f}" if variant.bits_per_weight else "-"
+    size = f"{variant.info.file_bytes / 1024**3:.2f}G"
+    if trial.score is None:
+        print(f"  {label:<26}{bpw:>6}{size:>9}   {style.grey(trial.detail or 'did not run')}")
+        return
+    spread = f"{trial.spread:.1%}" if trial.spread is not None else "-"
+    peak = f"{trial.peak_vram_mib} MiB" if trial.peak_vram_mib is not None else "-"
+    print(f"  {label:<26}{bpw:>6}{size:>9}{trial.score:>9.2f} t/s{spread:>8}{peak:>12}")
+    if not trial.reliable:
+        print(style.grey(f"  {'':<26}unreliable: {trial.detail or 'the spread is too wide'}"))
+
+
+def _run_quality(
+    variants: tuple[quant.Variant, ...],
+    args: argparse.Namespace,
+    devices: tuple[str, ...],
+    style: Style,
+) -> dict[str, quant.Quality]:
+    """Measure drift against the most precise local copy, if there is a corpus to use."""
+    reference = variants[0]
+    if not args.corpus:
+        print(style.bold("\nquality"), style.dim("not measured"))
+        print(
+            style.dim(
+                "  divergence needs a corpus. pass one with -f and it will be measured "
+                f"against {_quant_label(reference.reference)}, the most precise copy here"
+            )
+        )
+        return {}
+
+    projected = quant.logits_bytes(reference.info.vocab_size, args.chunks, args.context)
+    logits = Path(args.logits) if args.logits else Path(args.corpus).with_suffix(".logits")
+    if projected:
+        print(
+            style.bold("\nquality"),
+            style.dim(
+                f"against {_quant_label(reference.reference)} over {args.chunks} chunks "
+                f"of {Path(args.corpus).name}"
+            ),
+        )
+        print(
+            style.dim(
+                f"  the reference logits file will be about {projected // 1024**2} MiB "
+                f"({reference.info.vocab_size} vocabulary entries per corpus token)"
+            )
+        )
+    failure = quant.write_reference_logits(
+        reference=reference,
+        corpus=args.corpus,
+        logits_path=logits,
+        chunks=args.chunks,
+        context=args.context,
+        n_gpu_layers=reference.info.block_count + 1,
+        devices=devices,
+        binary=args.perplexity,
+    )
+    if failure:
+        print(style.red(f"  the reference pass failed: {failure}"))
+        return {}
+
+    print(f"  {'variant':<26}{'ppl ratio':>11}{'median KLD':>13}{'same top':>11}{'rms dp':>9}")
+    out: dict[str, quant.Quality] = {}
+    for variant in variants[1:]:
+        quality = quant.measure_quality(
+            variant=variant,
+            reference=reference,
+            corpus=args.corpus,
+            logits_path=logits,
+            chunks=args.chunks,
+            context=args.context,
+            n_gpu_layers=variant.info.block_count + 1,
+            devices=devices,
+            binary=args.perplexity,
+        )
+        out[variant.reference] = quality
+        _render_quality(variant, quality, style)
+    if not args.keep_logits:
+        logits.unlink(missing_ok=True)
+        print(style.dim("  the logits file was removed; keep it with --keep-logits"))
+    return out
+
+
+def _render_quality(variant: quant.Variant, quality: quant.Quality, style: Style) -> None:
+    label = _quant_label(variant.reference)
+    if not quality.measured:
+        print(f"  {label:<26}{style.grey(quality.detail or 'nothing was reported')}")
+        return
+    ratio = f"{quality.ppl_ratio:.3f}" if quality.ppl_ratio is not None else "-"
+    kld = f"{quality.median_kld:.4f}" if quality.median_kld is not None else "-"
+    top = f"{quality.same_top_pct:.1f}%" if quality.same_top_pct is not None else "-"
+    rms = f"{quality.rms_delta_p_pct:.1f}%" if quality.rms_delta_p_pct is not None else "-"
+    print(f"  {label:<26}{ratio:>11}{kld:>13}{top:>11}{rms:>9}")
+
+
+def _render_quant_decision(
+    variants: tuple[quant.Variant, ...],
+    speeds: dict[str, tune.Trial],
+    qualities: dict[str, quant.Quality],
+    style: Style,
+) -> None:
+    """State the trade rather than pick a side: quality tolerance is the user's call."""
+    reference = variants[0]
+    base_trial = speeds.get(reference.reference)
+    for variant in variants[1:]:
+        trial = speeds.get(variant.reference)
+        if trial is None or trial.score is None or base_trial is None or base_trial.score is None:
+            continue
+        faster = trial.score / base_trial.score - 1
+        smaller = reference.info.file_bytes - variant.info.file_bytes
+        line = (
+            f"  {_quant_label(variant.reference)} is {faster:+.0%} on decode and "
+            f"{smaller / 1024**2:.0f} MiB smaller than {_quant_label(reference.reference)}"
+        )
+        print(line)
+        quality = qualities.get(variant.reference)
+        if quality is None or not quality.measured:
+            print(style.dim("  what that costs in quality was not measured"))
+            continue
+        if quality.same_top_pct is not None:
+            print(
+                style.dim(
+                    f"  it picks a different most-likely token {100 - quality.same_top_pct:.1f}% "
+                    "of the time"
+                )
+            )
+        if quality.ppl_ratio is not None:
+            print(style.dim(f"  and its perplexity is {quality.ppl_ratio:.3f} times as high"))
+    print(style.dim("  whether that trade is worth taking is not a measurement"))
+
+
+def _quant_mapping(
+    variants: tuple[quant.Variant, ...],
+    speeds: dict[str, tune.Trial],
+    qualities: dict[str, quant.Quality],
+) -> dict[str, Any]:
+    return {
+        "reference": _quant_label(variants[0].reference) if variants else None,
+        "variants": [
+            {
+                "variant": _quant_label(v.reference),
+                "file_type": v.file_type,
+                "bits_per_weight": v.bits_per_weight,
+                "file_bytes": v.info.file_bytes,
+                "decode_tok_s": (
+                    speeds.get(v.reference).score if speeds.get(v.reference) else None
+                ),
+                "spread": (speeds.get(v.reference).spread if speeds.get(v.reference) else None),
+                "peak_vram_mb": (
+                    speeds.get(v.reference).peak_vram_mib if speeds.get(v.reference) else None
+                ),
+                "quality": (
+                    {
+                        "ppl_ratio": qualities[v.reference].ppl_ratio,
+                        "median_kld": qualities[v.reference].median_kld,
+                        "same_top_pct": qualities[v.reference].same_top_pct,
+                        "rms_delta_p_pct": qualities[v.reference].rms_delta_p_pct,
+                        "corpus": qualities[v.reference].corpus,
+                        "chunks": qualities[v.reference].chunks,
+                    }
+                    if v.reference in qualities and qualities[v.reference].measured
+                    else None
+                ),
+            }
+            for v in variants
+        ],
+    }
+
+
 def cmd_route(args: argparse.Namespace) -> int:
     """Say which measured model should answer, once the switch is paid for."""
     style = Style(color_enabled())
@@ -1766,6 +2035,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_bench.add_argument("--json", action="store_true", help="emit machine-readable output")
     p_bench.set_defaults(func=cmd_bench)
+
+    p_quant = sub.add_parser(
+        "quant",
+        help="compare the local quantizations of one model",
+        description=(
+            "Measures speed and VRAM for every quantization of this model on this "
+            "machine. Quality is measured as divergence from the most precise local "
+            "copy, and only when a corpus is given: without one it is reported as not "
+            "measured rather than guessed."
+        ),
+    )
+    p_quant.add_argument("model", help="path to a .gguf file, or an Ollama model name")
+    p_quant.add_argument(
+        "-c", "--context", type=int, default=512, metavar="N", help="context for both passes"
+    )
+    p_quant.add_argument(
+        "--ubatch", type=int, default=128, metavar="N", help="microbatch for the speed pass"
+    )
+    p_quant.add_argument(
+        "--repetitions", type=int, default=3, metavar="N", help="runs per speed measurement"
+    )
+    p_quant.add_argument("--device", metavar="NAME", help="accelerator to measure on")
+    p_quant.add_argument(
+        "-f", "--corpus", metavar="PATH", help="text file to measure divergence over"
+    )
+    p_quant.add_argument(
+        "--chunks",
+        type=int,
+        default=quant.DEFAULT_CHUNKS,
+        metavar="N",
+        help="corpus chunks; the reference logits file grows with this",
+    )
+    p_quant.add_argument("--logits", metavar="PATH", help="where to put the reference logits")
+    p_quant.add_argument(
+        "--keep-logits", action="store_true", help="do not delete the reference logits"
+    )
+    p_quant.add_argument(
+        "--perplexity",
+        default=quant.PERPLEXITY_BINARY,
+        metavar="PATH",
+        help="llama-perplexity binary, if it is not on PATH",
+    )
+    p_quant.add_argument("--json", action="store_true", help="emit machine-readable output")
+    p_quant.set_defaults(func=cmd_quant)
 
     p_route = sub.add_parser(
         "route",
