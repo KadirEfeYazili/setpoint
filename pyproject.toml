@@ -23,6 +23,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The panel is an extra on purpose. `doctor` and `budget` have to keep working with
+# nothing installed beyond the two runtime dependencies, so the interface cannot be
+# allowed to make itself required.
+tui = [
+    "textual>=8.0",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
