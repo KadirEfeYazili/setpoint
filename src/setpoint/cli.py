@@ -22,6 +22,7 @@ from . import (
     doctor,
     export,
     monitor,
+    panel,
     quant,
     route,
     sentinel,
@@ -1109,6 +1110,42 @@ def cmd_bench(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_panel(args: argparse.Namespace) -> int:
+    """Open the panel, or say what to install."""
+    if not panel.available():
+        print(
+            "setpoint: the panel needs the tui extra. Install it with `pip install setpoint[tui]`.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    if args.check:
+        # Enough to prove the panel has something to show without opening a screen,
+        # which is also what a headless test can assert on.
+        snapshot = panel.gather(args.model, args.context)
+        style = Style(color_enabled())
+        print(style.bold("card"))
+        for row in snapshot.card.rows:
+            _row(style, row.label, row.value, row.note)
+        if snapshot.budget is not None and not snapshot.budget.detail:
+            print(style.bold(f"\nbudget   {snapshot.budget.model} at {snapshot.budget.context}"))
+            for row in (*snapshot.budget.rows, *snapshot.budget.plan_rows):
+                _row(style, row.label, row.value, row.note)
+        print(style.bold("\nprofiles"))
+        for view in snapshot.profiles:
+            _row(
+                style,
+                view.model[:22],
+                f"{view.decode_tok_s:.2f} t/s" if view.decode_tok_s else "-",
+                f"c{view.context}, {view.checks} check(s)",
+            )
+        return EXIT_OK
+    try:
+        return panel.run(reference=args.model, context=args.context, interval=args.interval)
+    except ImportError as exc:
+        print(f"setpoint: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+
 def cmd_quant(args: argparse.Namespace) -> int:
     """Compare the local quantizations of one model on speed, size and drift."""
     style = Style(color_enabled())
@@ -2041,6 +2078,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_bench.add_argument("--json", action="store_true", help="emit machine-readable output")
     p_bench.set_defaults(func=cmd_bench)
+
+    p_panel = sub.add_parser(
+        "panel",
+        help="one screen for what setpoint measured",
+        description=(
+            "Shows the budget in its terms, the plan, the stored profiles and their "
+            "regression history, and can run `setpoint tune` and stream it. The panel "
+            "measures nothing itself: every figure comes from a command that already "
+            "prints it. Needs the tui extra."
+        ),
+    )
+    p_panel.add_argument(
+        "model", nargs="?", help="model to budget for; the first local one by default"
+    )
+    p_panel.add_argument(
+        "-c",
+        "--context",
+        type=int,
+        default=panel.data.DEFAULT_CONTEXT,
+        metavar="N",
+        help="context to budget for",
+    )
+    p_panel.add_argument(
+        "--interval", type=float, default=2.0, metavar="S", help="seconds between card reads"
+    )
+    p_panel.add_argument(
+        "--check",
+        action="store_true",
+        help="print what the panel would show and exit, without opening a screen",
+    )
+    p_panel.set_defaults(func=cmd_panel)
 
     p_quant = sub.add_parser(
         "quant",
