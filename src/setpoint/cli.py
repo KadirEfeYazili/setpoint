@@ -338,6 +338,27 @@ def cmd_budget(args: argparse.Namespace) -> int:
     return EXIT_OK if plan.offload.fits_fully else EXIT_PROBLEM
 
 
+def _history_mapping(profile: profiles.Profile) -> list[dict[str, Any]]:
+    """Every regression check recorded for this profile, oldest first."""
+    path = sentinel.history_path(profile.signature.model_digest, profile.target.context)
+    return [
+        {
+            "at": record.at,
+            "decode_tok_s": record.statistic.median,
+            "spread": record.statistic.spread,
+            "runs": record.statistic.runs,
+            "peak_vram_mb": record.peak_vram_mb,
+            "note": record.note,
+        }
+        for record in sentinel.load(path)
+    ]
+
+
+def _switch_seconds(profile: profiles.Profile) -> float | None:
+    cost = route.read_load(profile.signature.model_digest)
+    return cost.median if cost else None
+
+
 def _render_profile(profile: profiles.Profile, style: Style) -> None:
     signature, config, measurement = profile.signature, profile.config, profile.measurement
     print(style.bold("model"))
@@ -507,7 +528,12 @@ def cmd_profile(args: argparse.Namespace) -> int:
             print(f"setpoint: {args.id!r} matches {len(wanted)} profiles", file=sys.stderr)
             return EXIT_ERROR
         if args.json:
-            print(json.dumps(profiles.to_mapping(wanted[0]), indent=2))
+            # The evidence trail goes with the profile: the panel shows it, and the
+            # rule for the panel is that everything it shows is also scriptable.
+            payload = profiles.to_mapping(wanted[0])
+            payload["history"] = _history_mapping(wanted[0])
+            payload["switch_seconds"] = _switch_seconds(wanted[0])
+            print(json.dumps(payload, indent=2))
         else:
             _render_profile(wanted[0], style)
         return EXIT_OK
