@@ -12,8 +12,9 @@
 `setpoint` finds the configuration your hardware can actually hold, by measuring it
 instead of guessing, and remembers the answer.
 
-> **Status: early development.** All ten commands run, and have been used to measure
-> real hardware. Nothing is published to a package index yet. See [Roadmap](#roadmap).
+> **Status: early development.** All fourteen commands run, and have been used to
+> measure real hardware. Nothing is published to a package index yet.
+> See [Roadmap](#roadmap).
 
 ---
 
@@ -57,6 +58,15 @@ measure  ->  compare against the setpoint  ->  apply  ->  measure again
 - **Profile.** Stores the result keyed by a hardware and model signature, together with
   the measurement that justifies it. A profile that cannot show what it beat is not
   written.
+- **Apply.** Turns the measured profiles into a runner's configuration, with the
+  measurement behind each entry kept as a comment, so the settings that reach the engine
+  are the ones that were measured.
+- **Watch.** Re-measures a profile and decides statistically whether the machine has
+  slowed, separating a real regression from a busy afternoon, and says what changed.
+- **Choose.** Costs a request against every measured model, counting what it takes to
+  load one that is not already running; measures whether speculative decoding pays on
+  this card and for which kind of work; and compares local quantizations on speed, VRAM
+  and divergence from the most precise copy present.
 
 ### Measurement discipline
 
@@ -79,7 +89,59 @@ uv pip install -e .
 setpoint doctor
 ```
 
-Requires Python 3.10+ and, for GPU checks, an NVIDIA driver.
+Requires Python 3.10+ and, for GPU checks, an NVIDIA driver. The core has two
+dependencies. `setpoint panel` needs one more and is an optional extra:
+
+```bash
+uv pip install -e ".[tui]"
+```
+
+Measuring throughput needs a llama.cpp build on `PATH`. If the binaries live elsewhere,
+point at them:
+
+```bash
+export SETPOINT_LLAMA_BENCH=/path/to/llama-bench
+export SETPOINT_LLAMA_SERVER=/path/to/llama-server
+```
+
+## Commands
+
+`MODEL` is a path to a `.gguf` file or the name of a model already on this machine.
+
+```bash
+setpoint doctor                      # scan for traps that silently cost throughput
+setpoint hardware                    # what the driver and the OS report right now
+setpoint budget MODEL -c N           # where the split has to fall, running nothing
+setpoint tune MODEL -c N             # measure a configuration and write a profile
+setpoint bench MODEL                 # re-measure a profile, say whether it still holds
+setpoint run MODEL -- ARGS           # start llama-server with the measured profile
+setpoint route --tokens N            # which measured model answers, switch cost included
+setpoint spec MODEL                  # whether speculative decoding pays here, per workload
+setpoint quant MODEL -f CORPUS       # compare local quantizations: speed, VRAM, drift
+setpoint export --target NAME        # runner configuration from the measured profiles
+setpoint top                         # live: VRAM, shared memory, throttle
+setpoint status                      # one-shot machine state
+setpoint profile list|show|path|export|import
+setpoint panel                       # one screen for everything measured
+```
+
+Exit codes are part of the contract: `0` healthy, `1` a problem was found, `2` setpoint
+could not complete the check. Data goes to stdout and diagnostics to stderr, so every
+command composes with `jq` and shell pipelines.
+
+`--json` is accepted by `doctor`, `hardware`, `budget`, `tune`, `bench`, `route`,
+`spec`, `quant`, `status` and `profile`. `export` writes its own format, `top` and
+`panel` are screens, and `run` hands over to the server.
+
+A first session, in order:
+
+```bash
+setpoint doctor                      # fix what it reports before measuring anything
+setpoint budget qwen2.5:3b -c 4096   # see the tradeoff
+setpoint tune qwen2.5:3b -c 4096     # measure it, write the profile
+setpoint run qwen2.5:3b              # use it
+setpoint bench qwen2.5:3b            # later: is it still true
+```
 
 ## Budgeting
 
@@ -91,13 +153,15 @@ $ setpoint budget qwen3:8b -c 8192
 
 model
   qwen3:8b   qwen3 8.2B dense, Q4_K_M, 36 blocks
+  ~/.ollama/models/blobs/sha256-a3de86cd1..0b8e686f   4.87 GiB
+  trained context 40960, 32 heads over 8 KV heads
 
 vram  NVIDIA GeForce GTX 1650
   total                   4.00 GiB
-  free                    3.87 GiB   measured
-  fragmentation          -0.12 GiB
-  runtime allowance      -0.19 GiB   estimate; `setpoint tune` measures it
-  safe ceiling            3.57 GiB
+  free                    3.06 GiB   measured now
+  fragmentation          -0.25 GiB
+  runtime allowance      -0.34 GiB   calibrated on Vulkan, GTX 1650, two vocabularies
+  safe ceiling            2.48 GiB
 
 need  at 8192 tokens
   weights                 4.86 GiB
@@ -105,12 +169,20 @@ need  at 8192 tokens
   total                   5.99 GiB
 
 plan
-  -ngl 24                 24 of 36   blocks on the GPU
-  on cpu                  2.53 GiB   42% of the model
+  -ngl 17                 17 of 36   blocks on the GPU
+  on gpu                  2.45 GiB   weights 1.92 GiB + cache 0.53 GiB
+  next block needs        0.15 GiB   desktop usage drifting by this much moves the plan
+  on cpu                  3.53 GiB   59% of the model
 
 instead
-  -ctk q8_0 -ctv q8_0      -ngl 27   frees 0.53 GiB
-  -c 4096                  -ngl 27   frees 0.56 GiB
+  -ctk q8_0 -ctv q8_0      -ngl 19   frees 0.53 GiB
+      a quantized KV cache, at the same context
+  -c 4096                  -ngl 19   frees 0.56 GiB
+      a shorter context, at the same cache precision
+
+  note: What stays on the CPU (3.53 GiB) is a large share of the 3.69 GiB of RAM free
+  right now, and reading the model will cache up to 4.87 GiB more. Close something
+  before measuring.
 ```
 
 It exits 0 when the request fits entirely on the GPU and 1 when part of it has to stay
@@ -118,11 +190,13 @@ on the CPU, so it composes into scripts. `--json` emits the whole plan, includin
 candidate configurations the tuner will start from. The model argument takes a path to
 a `.gguf` file or the name of a model you already have locally.
 
-Two figures are honest about what they are. The runtime allowance covers the driver
-context and compute buffers of a process that has not started yet, so it is a stated
-default rather than a measurement. And where an architecture's KV cache does not follow
-the usual per-head layout, setpoint says it cannot size it instead of printing a number
-it did not derive.
+Three lines are honest about what they are. The runtime allowance covers the driver
+context and compute buffers of a process that has not started yet; it is computed from
+constants fitted on measured peaks, and the output names what they were fitted on, so a
+different backend is a reason to distrust it. `next block needs` is there because the
+budget is a single reading and a desktop's own VRAM use moves while you read it. And
+where an architecture's KV cache does not follow the usual per-head layout, setpoint
+says it cannot size it instead of printing a number it did not derive.
 
 ## Tuning
 
@@ -202,15 +276,16 @@ Each phase leaves something usable on its own.
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Research, ecosystem analysis, positioning | Done |
-| 1 | Budgeter, autotuner, doctor, profile format | In progress |
-| 2 | Runner configuration from measured profiles, live telemetry, profile sharing, regression sentinel | In progress |
-| 3 | Request routing, speculative decoding orchestration, quantization advisor | Planned |
-| 4 | Fast model switching, MoE expert cache policy, KV cache tiering | Planned |
+| 1 | Budgeter, autotuner, doctor, profile format | Done |
+| 2 | Runner configuration from measured profiles, live telemetry, profile sharing, regression sentinel | Done |
+| 3 | Request routing, speculative decoding orchestration, quantization advisor, panel | Done |
+| 4 | Fast model switching, MoE expert cache policy, KV cache tiering | In progress |
 | 5 | Knowledge layer: measured chunking, retrieval policy, embedding placement, search | Planned |
 | 6 | Reasoning layer: MCP server, statusline, agent resource API | Planned |
 | 7 | Contextual sparsity, learned eviction policies, upstream contribution | Research |
 
-Phase 1 targets llama.cpp only. Ollama and vLLM come in phase 2.
+llama.cpp is the only engine driven so far. Models stored by Ollama are found and
+read in place; other engines sit behind the same provider interface and are not done.
 
 ## Architecture
 
