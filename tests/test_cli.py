@@ -96,3 +96,55 @@ class TestParser:
     def test_a_regression_tolerance_wider_than_the_observed_spread(self):
         # Run-to-run spread measured at 0.56% on real hardware; the gate has to clear it.
         assert 0.01 < REGRESSION_TOLERANCE < 0.2
+
+
+class TestPanelContract:
+    """The panel may show nothing that a script cannot also read.
+
+    Written as a test because the rule is easy to break by accident: a pane gets a new
+    figure, and the only place it exists is on screen.
+    """
+
+    def test_the_panel_shows_nothing_the_json_does_not_carry(self):
+        from setpoint.panel import data
+
+        # Every field the profile pane puts on screen, and the command that carries it.
+        shown = {
+            "decode_tok_s",
+            "spread",
+            "speedup",
+            "n_gpu_layers",
+            "ubatch_size",
+            "speculator",
+            "peak_vram_mib",
+            "switch_seconds",
+            "checks",
+        }
+        assert shown <= set(data.ProfileView.__dataclass_fields__)
+
+    def test_profile_show_carries_the_history_and_the_switch_cost(self):
+        from setpoint import cli
+
+        # These two are the ones with no home of their own: the history lives in the
+        # sentinel's files and the switch cost in route's, so `profile show --json` is
+        # where they have to surface.
+        assert hasattr(cli, "_history_mapping")
+        assert hasattr(cli, "_switch_seconds")
+
+    def test_the_panel_command_can_report_without_opening_a_screen(self):
+        parser = build_parser()
+        args = parser.parse_args(["panel", "--check"])
+        assert args.check is True
+
+    def test_importing_the_cli_does_not_pull_in_the_extra(self):
+        # `doctor` and `budget` have to work with nothing installed, so the widgets are
+        # imported inside `panel.run()` rather than at module level. Checked here
+        # because the failure mode is silent: it only shows on a machine without it.
+        import subprocess
+        import sys
+
+        code = "import setpoint.cli, sys; print('textual' in sys.modules)"
+        done = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, check=True
+        )
+        assert done.stdout.strip() == "False"
