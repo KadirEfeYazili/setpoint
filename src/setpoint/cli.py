@@ -1958,6 +1958,7 @@ def cmd_export(args: argparse.Namespace) -> int:
         server_binary=server,
         vram_total_mb=facts.vram_total_mb,
         ttl_override=args.ttl,
+        sleep_override=args.sleep_idle,
         devices=devices,
     )
     header = [
@@ -2481,6 +2482,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
         help="idle unload timeout for every entry; the default is chosen from how much "
         "of the card each model holds",
+    )
+    p_export.add_argument(
+        "--sleep-idle",
+        type=int,
+        metavar="SECONDS",
+        help="idle seconds before a model releases its VRAM but keeps its process; "
+        "0 disables it. The default is chosen from how much of the card each model holds",
     )
     p_export.add_argument("--gpu", type=int, help="GPU index, when the machine has more than one")
     p_export.add_argument("--device", metavar="NAME", help="accelerator to pin entries to")

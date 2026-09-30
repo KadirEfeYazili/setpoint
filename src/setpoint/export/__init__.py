@@ -8,6 +8,7 @@ from __future__ import annotations
 from . import llamaserver, llamaswap
 from .llamaswap import (
     PORT_PLACEHOLDER,
+    SLEEP_BANDS,
     TTL_BANDS,
     ConfigEntry,
     build_entries,
@@ -15,12 +16,14 @@ from .llamaswap import (
     evidence,
     headline,
     render,
+    sleep_for,
     slug,
     ttl_for,
 )
 
 __all__ = [
     "PORT_PLACEHOLDER",
+    "SLEEP_BANDS",
     "llamaserver",
     "llamaswap",
     "TTL_BANDS",
@@ -31,5 +34,6 @@ __all__ = [
     "headline",
     "render",
     "slug",
+    "sleep_for",
     "ttl_for",
 ]

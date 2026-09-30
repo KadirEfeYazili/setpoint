@@ -179,6 +179,11 @@ plan
   next block needs        0.15 GiB   desktop usage drifting by this much moves the plan
   on cpu                  3.53 GiB   59% of the model
 
+host ram  what the prompt cache can claim
+  per conversation        1.12 GiB   parked when another conversation displaces it
+  --cache-ram ceiling     8.00 GiB   llama-server's default, room for 7
+  ram free now            3.68 GiB   0 fit beside what stays on the cpu
+
 instead
   -ctk q8_0 -ctv q8_0      -ngl 19   frees 0.53 GiB
       a quantized KV cache, at the same context
@@ -188,6 +193,10 @@ instead
   note: What stays on the CPU (3.53 GiB) is a large share of the 3.69 GiB of RAM free
   right now, and reading the model will cache up to 4.87 GiB more. Close something
   before measuring.
+
+  note: This model keeps 3.53 GiB in RAM, and the prompt cache parks 1.12 GiB per
+  displaced conversation in the same RAM. 0 conversation(s) fit in what is left; lower
+  --cache-ram to bound it.
 ```
 
 It exits 0 when the request fits entirely on the GPU and 1 when part of it has to stay
@@ -202,6 +211,15 @@ different backend is a reason to distrust it. `next block needs` is there becaus
 budget is a single reading and a desktop's own VRAM use moves while you read it. And
 where an architecture's KV cache does not follow the usual per-head layout, setpoint
 says it cannot size it instead of printing a number it did not derive.
+
+The host RAM section is there because VRAM is not the only budget. A server parks the
+context of a displaced conversation in host RAM so that returning to it is nearly free,
+and the ceiling on that store defaults to 8 GiB. On a machine where part of the model
+is already staying in RAM, those are two claims on the same memory. The per-conversation
+figure was measured against the KV estimate and matched it within one percent on a dense
+model; on a sliding-window model the host copy cost more than the estimate, so no window
+discount is taken. The warning appears only where the two claims actually collide, not
+wherever the ceiling is large.
 
 ## Tuning
 
