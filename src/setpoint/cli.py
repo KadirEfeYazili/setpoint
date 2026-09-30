@@ -284,6 +284,30 @@ def _render_budget(
         left_behind = "nothing; this model ties its embedding to the output"
     _row(style, "on cpu", gib(offload.cpu_bytes), left_behind)
 
+    cache = plan.prompt_cache
+    if cache is not None:
+        print(style.bold("\nhost ram  what the prompt cache can claim"))
+        _row(
+            style,
+            "per conversation",
+            gib(cache.bytes_per_conversation),
+            "parked when another conversation displaces it",
+        )
+        _row(
+            style,
+            "--cache-ram ceiling",
+            gib(cache.ceiling_bytes),
+            f"llama-server's default, room for {cache.conversations_under_ceiling}",
+        )
+        if plan.host_ram_bytes:
+            room = plan.host_ram_bytes - offload.cpu_bytes
+            _row(
+                style,
+                "ram free now",
+                gib(plan.host_ram_bytes),
+                f"{cache.conversations_within(room)} fit beside what stays on the cpu",
+            )
+
     if plan.alternatives:
         print(style.bold("\ninstead"))
         for option in plan.alternatives:
