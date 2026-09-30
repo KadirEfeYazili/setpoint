@@ -1,13 +1,14 @@
 ```
+────────────────────────────────────────────────────────────────
 ███████╗███████╗████████╗██████╗  ██████╗ ██╗███╗   ██╗████████╗
 ██╔════╝██╔════╝╚══██╔══╝██╔══██╗██╔═══██╗██║████╗  ██║╚══██╔══╝
 ███████╗█████╗     ██║   ██████╔╝██║   ██║██║██╔██╗ ██║   ██║
 ╚════██║██╔══╝     ██║   ██╔═══╝ ██║   ██║██║██║╚██╗██║   ██║
 ███████║███████╗   ██║   ██║     ╚██████╔╝██║██║ ╚████║   ██║
 ╚══════╝╚══════╝   ╚═╝   ╚═╝      ╚═════╝ ╚═╝╚═╝  ╚═══╝   ╚═╝
+────────────────────────────────────────────────────────────────
+measurement-driven configuration for local inference
 ```
-
-**Measurement-driven configuration for local LLM inference.**
 
 `setpoint` finds the configuration your hardware can actually hold, by measuring it
 instead of guessing, and remembers the answer.
