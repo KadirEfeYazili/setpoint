@@ -10,10 +10,13 @@ The chunking library is an optional extra, so this package imports it lazily.
 from __future__ import annotations
 
 from .measure import (
+    CALIBRATION_BYTES,
     MIN_CORPUS_BYTES,
+    SIZE_SAMPLE,
     Corpus,
     Document,
     Result,
+    calibrate,
     read_corpus,
     run,
 )
@@ -27,8 +30,10 @@ from .strategies import (
 )
 
 __all__ = [
+    "CALIBRATION_BYTES",
     "DEFAULT_CHUNK_TOKENS",
     "MIN_CORPUS_BYTES",
+    "SIZE_SAMPLE",
     "Corpus",
     "Document",
     "Result",
@@ -36,6 +41,7 @@ __all__ = [
     "Strategy",
     "available",
     "by_name",
+    "calibrate",
     "chonkie_tokenizer",
     "read_corpus",
     "run",

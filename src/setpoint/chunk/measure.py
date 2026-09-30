@@ -3,13 +3,18 @@
 The published comparisons of these strategies report throughput and retrieval quality.
 Neither says what peak VRAM a strategy reaches, and on a small card that is the figure
 that decides whether the generator still fits beside it. This measures it.
+
+Sizes are reported in the tokens of the model that will read the chunks, because that
+is the budget being spent. Getting them there without distorting the timings needs
+care: see `calibrate`.
 """
 
 from __future__ import annotations
 
+import random
 import statistics
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,6 +23,12 @@ from ..hardware import GpuWatcher
 # Below this a corpus is too small for the timings to mean anything: the fixed cost of
 # starting a strategy dominates and the comparison measures startup.
 MIN_CORPUS_BYTES = 64 * 1024
+
+# Enough chunks for a stable median without a round trip per chunk.
+SIZE_SAMPLE = 150
+
+# Enough text to pin the ratio; it varies by a few percent over a corpus, not by a lot.
+CALIBRATION_BYTES = 32 * 1024
 
 TEXT_SUFFIXES = (".txt", ".md", ".rst", ".text")
 
@@ -53,6 +64,18 @@ class Corpus:
     def label(self) -> str:
         return f"{len(self.documents)} documents, {self.total_bytes / 1024**2:.1f} MB"
 
+    def head(self, nbytes: int) -> str:
+        """The first stretch of text, for calibration."""
+        out: list[str] = []
+        taken = 0
+        for document in self.documents:
+            piece = document.text[: max(0, nbytes - taken)]
+            out.append(piece)
+            taken += len(piece)
+            if taken >= nbytes:
+                break
+        return "".join(out)
+
 
 @dataclass(frozen=True)
 class Result:
@@ -64,15 +87,12 @@ class Result:
     tokens_median: float
     tokens_p90: float
     peak_vram_mib: int | None
+    sampled: int = 0
     detail: str | None = None
 
     @property
     def ok(self) -> bool:
         return self.detail is None
-
-    @property
-    def megabytes_per_second(self) -> float:
-        return 0.0
 
     def throughput(self, corpus_bytes: int) -> float:
         return (corpus_bytes / 1024**2) / self.seconds if self.seconds else 0.0
@@ -113,11 +133,32 @@ def read_corpus(root: Path, limit_bytes: int | None = None) -> Corpus:
     return Corpus(documents=tuple(documents))
 
 
-def run(strategy, chunker, corpus: Corpus, count_tokens) -> Result:
+def calibrate(corpus: Corpus, count_tokens: Callable[[str], int]) -> float:
+    """Characters per token for this corpus, in the generator's own vocabulary.
+
+    A chunker that asks a remote tokenizer for every candidate split pays a round trip
+    each time: measured here, that turned a 1.4 s strategy into 47 s and the table would
+    have blamed the strategy. So the chunkers are driven by character counts and the
+    budget is converted once, using the real tokenizer on a sample of this corpus.
+    """
+    head = corpus.head(CALIBRATION_BYTES)
+    tokens = count_tokens(head) if head else 0
+    return len(head) / tokens if tokens else 4.0
+
+
+def run(
+    strategy,
+    chunker,
+    corpus: Corpus,
+    count_tokens: Callable[[str], int],
+    sample_size: int = SIZE_SAMPLE,
+    seed: int = 0,
+) -> Result:
     """Chunk the whole corpus once, timing it and watching the card.
 
     The card is watched rather than assumed: a strategy that runs no model should show
-    no rise, and that is a claim worth checking rather than stating.
+    no rise, and that is a claim worth checking rather than stating. Token counting
+    happens after the clock stops, on a sample, for the same reason as `calibrate`.
     """
     watcher = GpuWatcher()
     started = time.monotonic()
@@ -138,7 +179,11 @@ def run(strategy, chunker, corpus: Corpus, count_tokens) -> Result:
         )
     seconds = time.monotonic() - started
 
-    sizes = sorted(count_tokens(text) for text in chunks) or [0]
+    if len(chunks) <= sample_size:
+        picked = chunks
+    else:
+        picked = random.Random(seed).sample(chunks, sample_size)
+    sizes = sorted(count_tokens(text) for text in picked) or [0]
     return Result(
         strategy=strategy.name,
         seconds=seconds,
@@ -146,6 +191,7 @@ def run(strategy, chunker, corpus: Corpus, count_tokens) -> Result:
         tokens_median=statistics.median(sizes),
         tokens_p90=sizes[min(len(sizes) - 1, int(len(sizes) * 0.9))],
         peak_vram_mib=watcher.result.peak_vram_mib,
+        sampled=len(picked),
     )
 
 
@@ -156,8 +202,3 @@ def _texts(chunks: Iterable[object]) -> list[str]:
         text = getattr(chunk, "text", None)
         out.append(text if isinstance(text, str) else str(chunk))
     return out
-
-
-def sample(sizes: Sequence[int], fraction: float) -> int:
-    index = min(len(sizes) - 1, int(len(sizes) * fraction))
-    return sizes[index] if sizes else 0
