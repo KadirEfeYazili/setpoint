@@ -30,6 +30,16 @@ TTL_BANDS: tuple[tuple[float, int], ...] = (
     (0.00, 3600),
 )
 
+# Sleeping comes before unloading and is the cheaper of the two. Measured on a GTX 1650:
+# it hands back 98.6% of the model's VRAM, and the next request pays 2.9-4.7 s to wake,
+# against 3.8-5.8 s for a cold start. So a model that holds most of the card should
+# yield it quickly. Policy, like the bands above; `--sleep-idle` overrides them.
+SLEEP_BANDS: tuple[tuple[float, int], ...] = (
+    (0.75, 60),
+    (0.40, 180),
+    (0.00, 600),
+)
+
 # Dots survive: a user types "qwen2.5", and turning it into "qwen2-5" makes the
 # generated id harder to guess than the name it came from.
 _SLUG = re.compile(r"[^a-z0-9.]+")
@@ -75,6 +85,23 @@ def ttl_for(profile: Profile, vram_total_mb: int | None) -> int:
     return TTL_BANDS[-1][1]
 
 
+def sleep_for(profile: Profile, vram_total_mb: int | None, ttl: int) -> int:
+    """How long to keep an idle model's weights in VRAM before releasing them.
+
+    Always inside the unload TTL: past that the runner takes the whole process away and
+    sleeping first would have bought nothing.
+    """
+    peak = profile.measurement.peak_vram_mb
+    seconds = SLEEP_BANDS[-1][1]
+    if peak and vram_total_mb:
+        share = peak / vram_total_mb
+        for threshold, banded in SLEEP_BANDS:
+            if share >= threshold:
+                seconds = banded
+                break
+    return min(seconds, max(1, ttl - 1)) if ttl > 0 else seconds
+
+
 def headline(profile: Profile) -> str:
     """The measurement in one line, for the runner's own interface to show."""
     stat = profile.measurement.decode_tok_s
@@ -111,28 +138,41 @@ def build_entries(
     server_binary: str | Path = "llama-server",
     vram_total_mb: int | None = None,
     ttl_override: int | None = None,
+    sleep_override: int | None = None,
     devices: tuple[str, ...] = (),
 ) -> list[ConfigEntry]:
     """One entry per profile, plus a short alias where a model has only one."""
     entries: list[ConfigEntry] = []
     for profile in sorted(profiles, key=entry_name):
+        ttl = ttl_override if ttl_override is not None else ttl_for(profile, vram_total_mb)
+        sleep = (
+            sleep_override if sleep_override is not None else sleep_for(profile, vram_total_mb, ttl)
+        )
+        extra = ("--port", PORT_PLACEHOLDER)
+        comments = evidence(profile)
+        if sleep > 0:
+            extra += ("--sleep-idle-seconds", str(sleep))
+            comments.append(
+                f"releases its VRAM after {sleep}s idle and reloads on the next request; "
+                f"the runner unloads the process after {ttl}s"
+            )
         argv = server_argv(
             server_binary,
             profile.model.path or "",
             profile.config,
             profile.target.context,
             devices=devices,
-            extra=("--port", PORT_PLACEHOLDER),
+            extra=extra,
         )
         label = profile.model.name or profile.model.architecture or "model"
         entries.append(
             ConfigEntry(
                 name=entry_name(profile),
                 command=argv,
-                ttl=ttl_override if ttl_override is not None else ttl_for(profile, vram_total_mb),
+                ttl=ttl,
                 label=f"{label} ({profile.target.context} ctx)",
                 description=headline(profile),
-                comments=evidence(profile),
+                comments=comments,
             )
         )
 

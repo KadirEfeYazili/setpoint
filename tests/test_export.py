@@ -156,6 +156,38 @@ class TestUnloadPolicy:
         assert next(iter(data["models"].values()))["ttl"] == 42
 
 
+class TestSleepPolicy:
+    def test_a_model_holding_most_of_the_card_releases_it_soonest(self):
+        hungry = export.sleep_for(profile(peak_mb=3900), 4096, ttl=3600)
+        modest = export.sleep_for(profile(peak_mb=2000), 4096, ttl=3600)
+        tiny = export.sleep_for(profile(peak_mb=500), 4096, ttl=3600)
+        assert hungry < modest < tiny
+
+    def test_sleeping_always_happens_before_the_unload(self):
+        # Past the TTL the runner takes the process away, so sleeping first would have
+        # bought nothing.
+        assert export.sleep_for(profile(peak_mb=500), 4096, ttl=30) < 30
+
+    def test_an_unknown_peak_holds_the_vram_longest(self):
+        assert export.sleep_for(profile(peak_mb=None), 4096, ttl=3600) == export.SLEEP_BANDS[-1][1]
+
+    def test_the_flag_reaches_the_command_with_the_reason_beside_it(self):
+        text = rendered(profile(peak_mb=3900))
+        assert "--sleep-idle-seconds" in text
+        assert "releases its VRAM after" in text
+
+    def test_zero_turns_it_off_rather_than_sleeping_instantly(self):
+        assert "--sleep-idle-seconds" not in rendered(profile(), sleep_override=0)
+
+    def test_an_override_beats_the_policy(self):
+        assert "--sleep-idle-seconds 42" in rendered(profile(peak_mb=3900), sleep_override=42)
+
+    def test_the_preset_target_carries_it_too(self):
+        entries = export.build_entries([profile(peak_mb=3900)], vram_total_mb=4096)
+        text = export.llamaserver.render(entries)
+        assert "sleep-idle-seconds = " in text
+
+
 class TestDevicePinning:
     def test_a_named_device_reaches_the_command(self):
         text = rendered(profile(), devices=("Vulkan0",))
