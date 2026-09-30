@@ -1313,6 +1313,57 @@ def _command(
     return True
 
 
+def cmd_residency(args: argparse.Namespace) -> int:
+    """Who holds the card now, and what the policy would do with each measured model."""
+    style = Style(color_enabled())
+    view = panel.read_residency()
+    if view.detail:
+        print(f"setpoint: {view.detail}", file=sys.stderr)
+        return EXIT_ERROR
+
+    if args.json:
+        print(json.dumps(_residency_mapping(view), indent=2))
+        return EXIT_OK
+
+    print(style.bold("on the card now"))
+    for row in view.rows:
+        _row(style, row.label, row.value, row.note)
+
+    inference = [row for row in view.processes if row.note == "inference"]
+    print(style.bold(f"\nholding it   {len(view.processes)} process(es)"))
+    if inference:
+        for row in inference:
+            _row(style, row.label, row.value, row.note)
+    else:
+        print(style.dim("  none of them is an inference process"))
+    if args.all:
+        for row in view.processes:
+            if row.note != "inference":
+                _row(style, row.label, row.value, row.note)
+    elif len(view.processes) > len(inference):
+        print(style.dim(f"  {len(view.processes) - len(inference)} more; --all lists them"))
+
+    if view.models:
+        print(style.bold("\nwhat the policy would do"))
+        for row in view.models:
+            _row(style, row.label, row.value, row.note)
+    else:
+        print(style.dim("\nnothing measured yet; run `setpoint tune` first"))
+    return EXIT_OK
+
+
+def _residency_mapping(view: panel.ResidencyView) -> dict[str, Any]:
+    """The schema `--json` promises. Every row the pane shows is in here."""
+    return {
+        "card": [{"label": r.label, "value": r.value, "note": r.note} for r in view.rows],
+        "processes": [
+            {"binary": r.label, "vram": r.value, "inference": r.note == "inference"}
+            for r in view.processes
+        ],
+        "policy": [{"label": r.label, "value": r.value, "note": r.note} for r in view.models],
+    }
+
+
 def cmd_panel(args: argparse.Namespace) -> int:
     """Open the panel, or say what to install."""
     if not panel.available():
@@ -2322,6 +2373,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="tokens of context kept free for the answer",
     )
     p_chat.set_defaults(func=cmd_chat)
+
+    p_residency = sub.add_parser(
+        "residency",
+        help="who holds the card, and what the policy would do with each model",
+        description=(
+            "Reports what is on the card right now and, for every measured profile, "
+            "how much of the card it holds, when it would release that memory, when "
+            "the runner would unload it, and what returning to it costs. The driver "
+            "on some machines lists the processes holding the card without attributing "
+            "memory to any of them; where that is so, this says so instead of "
+            "dividing the total up."
+        ),
+    )
+    p_residency.add_argument(
+        "--all", action="store_true", help="list every process, not only the inference ones"
+    )
+    p_residency.add_argument("--json", action="store_true", help="machine-readable output")
+    p_residency.set_defaults(func=cmd_residency)
 
     p_panel = sub.add_parser(
         "panel",

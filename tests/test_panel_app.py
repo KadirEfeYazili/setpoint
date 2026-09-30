@@ -45,6 +45,11 @@ PROFILE = data.ProfileView(
     checks=3,
     created="2026-09-09T12:23:24Z",
 )
+RESIDENCY = data.ResidencyView(
+    rows=(data.Row("card", "Test GPU"), data.Row("in use", "1577 MiB", "every process together")),
+    processes=(data.Row("llama-server.exe", "-", "inference"),),
+    models=(data.Row("gemma3 Q4_K_M c4096", "1335 MiB", "33% of the card"),),
+)
 TARGET = data.ChatTarget(
     reference="gemma3:1b",
     label="gemma3 Q4_K_M",
@@ -71,6 +76,7 @@ def _no_machine(monkeypatch):
     monkeypatch.setattr(data, "read_card", lambda *a, **k: CARD)
     monkeypatch.setattr(data, "read_history", lambda *a, **k: ())
     monkeypatch.setattr(data, "read_chat_target", lambda *a, **k: TARGET)
+    monkeypatch.setattr(data, "read_residency", lambda *a, **k: RESIDENCY)
 
 
 def drive(coro):
@@ -138,7 +144,7 @@ class TestInteraction:
             app = Panel(reference="gemma3:1b", interval=60.0)
             async with app.run_test(size=(120, 44)) as pilot:
                 await pilot.pause()
-                for target in ("profiles", "search", "budget"):
+                for target in ("profiles", "search", "residency", "chat", "budget"):
                     app.query_one("TabbedContent").active = target
                     await pilot.pause()
 
@@ -400,5 +406,36 @@ class TestChat:
                 await pilot.pause()
                 assert app.conversation.turns == []
                 assert lines(app).strip() == ""
+
+        drive(go())
+
+
+class TestResidencyPane:
+    def test_it_shows_the_card_the_processes_and_the_policy(self):
+        async def go():
+            app = Panel(reference="gemma3:1b", interval=60.0)
+            async with app.run_test(size=(120, 44)) as pilot:
+                await pilot.pause()
+                app.query_one("TabbedContent").active = "residency"
+                await pilot.pause()
+                assert app.query_one("#residency-card", DataTable).row_count == 2
+                assert app.query_one("#residency-processes", DataTable).row_count == 1
+                assert app.query_one("#residency-models", DataTable).row_count == 1
+
+        drive(go())
+
+    def test_a_machine_without_a_card_says_so_instead_of_emptying(self, monkeypatch):
+        monkeypatch.setattr(
+            data, "read_residency", lambda *a, **k: data.ResidencyView(detail="no GPU was found")
+        )
+
+        async def go():
+            app = Panel(reference="gemma3:1b", interval=60.0)
+            async with app.run_test(size=(120, 44)) as pilot:
+                await pilot.pause()
+                app.query_one("TabbedContent").active = "residency"
+                await pilot.pause()
+                table = app.query_one("#residency-card", DataTable)
+                assert "no GPU was found" in str(table.get_row_at(0))
 
         drive(go())
