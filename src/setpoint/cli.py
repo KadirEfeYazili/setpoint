@@ -1244,14 +1244,14 @@ def _chat_loop(
         print()
 
         text = "".join(pieces)
-        # The stream carries no timings, so the same server is asked for them after the
-        # text has been shown. Its counters are per-request and still the last ones.
-        reply = session.complete([{"role": "user", "content": "."}], max_tokens=1, temperature=0)
+        # Timings come from the stream's own closing event. Asking again afterwards
+        # would time that second request instead, which is how this printed 0.0 t/s.
+        measured = session.last
         answer = chat.Turn(
             role="assistant",
             text=text,
-            decode_tok_s=reply.decode_tok_s,
-            tokens=count(text),
+            decode_tok_s=measured.decode_tok_s if measured else None,
+            tokens=(measured.tokens if measured and measured.tokens else count(text)),
             peak_vram_mib=watcher.result.peak_vram_mib,
             speculator=profile.config.spec_type,
         )
@@ -1265,10 +1265,13 @@ def _render_cost(turn: chat.Turn, profile: profiles.Profile, style: Style) -> No
     bits = []
     if turn.tokens is not None:
         bits.append(f"{turn.tokens} tokens")
-    if turn.decode_tok_s is not None:
+    if turn.decode_tok_s:
         claimed = profile.measurement.decode_tok_s.median
         drift = f" ({turn.decode_tok_s / claimed - 1:+.0%} on the profile)" if claimed else ""
         bits.append(f"{turn.decode_tok_s:.1f} t/s{drift}")
+    elif turn.tokens is not None:
+        # Never a zero: the server not reporting a rate is not a rate of nothing.
+        bits.append("rate not reported")
     if turn.peak_vram_mib is not None:
         bits.append(f"peak {turn.peak_vram_mib} MiB")
     if bits:

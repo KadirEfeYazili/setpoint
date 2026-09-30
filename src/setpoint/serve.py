@@ -58,6 +58,7 @@ class Session:
     argv: list[str] = field(init=False, default_factory=list)
 
     def __post_init__(self) -> None:
+        self.last: Reply | None = None
         self.port = self.port or free_port()
         flags: tuple[str, ...] = ("--port", str(self.port), "--metrics", *self.extra)
         if self.speculator:
@@ -140,24 +141,44 @@ class Session:
 
         A local model answers slowly enough that waiting for the whole reply feels like
         a hang, so the pieces are handed over as they come.
+
+        The timings of this reply land in `last`, taken from the stream's own closing
+        event. Timing a second request instead would measure that request.
         """
+        self.last = None
         payload = {
             "model": "setpoint",
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
         request = urllib.request.Request(
             f"{self.base}/v1/chat/completions",
             data=json.dumps(payload).encode(),
             headers={"Content-Type": "application/json"},
         )
+        text: list[str] = []
         with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_S) as response:
             for raw in response:
-                piece = _fragment(raw)
+                event = _event(raw)
+                if event is None:
+                    continue
+                piece = _content_of(event)
                 if piece:
+                    text.append(piece)
                     yield piece
+                if event.get("timings") or event.get("usage"):
+                    self.last = _reply_of({**event, "choices": []})
+        if self.last is not None:
+            self.last = Reply(
+                text="".join(text),
+                decode_tok_s=self.last.decode_tok_s,
+                prompt_tok_s=self.last.prompt_tok_s,
+                tokens=self.last.tokens,
+                prompt_tokens=self.last.prompt_tokens,
+            )
 
     def counters(self) -> dict[str, int]:
         """The server's speculation counters, which say whether a drafter fired."""
@@ -191,19 +212,23 @@ def _reply_of(body: dict) -> Reply:
     )
 
 
-def _fragment(raw: bytes) -> str:
-    """One token out of a server-sent-events line, or nothing."""
+def _event(raw: bytes) -> dict | None:
+    """One server-sent event, or nothing for a keepalive or the end marker."""
     line = raw.decode("utf-8", "replace").strip()
     if not line.startswith("data:"):
-        return ""
+        return None
     data = line[5:].strip()
     if not data or data == "[DONE]":
-        return ""
+        return None
     try:
         parsed = json.loads(data)
     except ValueError:
-        return ""
-    delta = (parsed.get("choices") or [{}])[0].get("delta") or {}
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _content_of(event: dict) -> str:
+    delta = (event.get("choices") or [{}])[0].get("delta") or {}
     return str(delta.get("content") or "")
 
 

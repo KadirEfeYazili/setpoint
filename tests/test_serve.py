@@ -100,24 +100,37 @@ class TestReply:
         assert not failed.ok
 
 
+def piece(raw: bytes) -> str:
+    event = serve._event(raw)
+    return serve._content_of(event) if event else ""
+
+
 class TestStreamFragments:
     def test_it_reads_a_token_out_of_an_event(self):
-        line = b'data: {"choices":[{"delta":{"content":"hel"}}]}'
-        assert serve._fragment(line) == "hel"
+        assert piece(b'data: {"choices":[{"delta":{"content":"hel"}}]}') == "hel"
 
-    def test_the_end_marker_yields_nothing(self):
-        assert serve._fragment(b"data: [DONE]") == ""
+    def test_the_end_marker_is_not_an_event(self):
+        assert serve._event(b"data: [DONE]") is None
 
-    def test_a_keepalive_yields_nothing(self):
-        assert serve._fragment(b"") == ""
-        assert serve._fragment(b": ping") == ""
+    def test_a_keepalive_is_not_an_event(self):
+        assert serve._event(b"") is None
+        assert serve._event(b": ping") is None
 
     def test_a_malformed_event_is_skipped_rather_than_fatal(self):
         # A stream that dies mid-token would otherwise take the conversation with it.
-        assert serve._fragment(b"data: {not json") == ""
+        assert serve._event(b"data: {not json") is None
 
     def test_an_event_with_no_content_yields_nothing(self):
-        assert serve._fragment(b'data: {"choices":[{"delta":{"role":"assistant"}}]}') == ""
+        assert piece(b'data: {"choices":[{"delta":{"role":"assistant"}}]}') == ""
+
+    def test_the_closing_event_carries_the_timings(self):
+        # Where the rate has to come from. Timing a second request instead reported
+        # that request, which is how the chat once printed 0.0 t/s.
+        event = serve._event(
+            b'data: {"choices":[],"timings":{"predicted_per_second":72.7,"predicted_n":23}}'
+        )
+        assert event is not None
+        assert serve._reply_of(event).decode_tok_s == 72.7
 
 
 class TestPort:
