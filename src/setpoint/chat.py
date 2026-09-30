@@ -77,6 +77,25 @@ class Conversation:
         self.dropped = 0
 
 
+def cost_line(turn: Turn, claimed: float | None = None) -> str:
+    """What one answer cost, next to what the profile said it would.
+
+    A missing rate is said to be missing. Printing zero once made an answer that was
+    never timed look like the slowest one in the conversation.
+    """
+    bits: list[str] = []
+    if turn.tokens is not None:
+        bits.append(f"{turn.tokens} tokens")
+    if turn.decode_tok_s:
+        drift = f" ({turn.decode_tok_s / claimed - 1:+.0%} on the profile)" if claimed else ""
+        bits.append(f"{turn.decode_tok_s:.1f} t/s{drift}")
+    elif turn.tokens is not None:
+        bits.append("rate not reported")
+    if turn.peak_vram_mib is not None:
+        bits.append(f"peak {turn.peak_vram_mib} MiB")
+    return "   ".join(bits)
+
+
 def estimate_tokens(text: str) -> int:
     """A token count for when the server cannot be asked for a real one."""
     return max(1, len(text) // CHARS_PER_TOKEN)
