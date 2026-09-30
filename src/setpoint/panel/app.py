@@ -17,19 +17,23 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import (
     DataTable,
     Footer,
-    Header,
     Input,
     Label,
     RichLog,
     Select,
+    Static,
     TabbedContent,
     TabPane,
 )
 
+from .. import banner
 from . import data
 
 CSS = """
 Screen { layout: vertical; }
+/* Docked, so it stays put while the panes below it scroll. A mark that scrolls out
+   of view is a mark that is not there. */
+#banner { dock: top; height: auto; padding: 1 0 0 0; }
 #controls { height: auto; padding: 0 1; }
 #controls Label { padding: 1 1 0 0; }
 #controls Select { width: 34; }
@@ -64,7 +68,7 @@ class Panel(App):
         self._listed: tuple[str, ...] = ()
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield Static(id="banner")
         with TabbedContent(initial="budget"):
             with TabPane("budget", id="budget"), VerticalScroll(classes="pane"):
                 with Horizontal(id="controls"):
@@ -96,6 +100,7 @@ class Panel(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        self.paint_banner()
         self.query_one("#profiles-table", DataTable).add_columns(
             "id", "model", "ctx", "-ngl", "decode", "vs base", "speculator"
         )
@@ -118,6 +123,37 @@ class Panel(App):
         self._fill_budget(snapshot)
         self._fill_profiles(snapshot)
 
+    def on_resize(self, _: object) -> None:
+        """The mark is chosen from the width, so it is chosen again when that changes."""
+        self.paint_banner()
+
+    def paint_banner(self) -> None:
+        """The whole mark, docked at the top left.
+
+        Whole, at whatever size fits: a narrower window drops to the small mark rather
+        than to a shortened wordmark, because a wordmark missing its lower half reads as
+        broken rather than as small. Left aligned, so it sits in the same place at every
+        width instead of sliding as the window changes.
+
+        A resize arrives before the widget is mounted, so this asks rather than assumes:
+        raising inside an event handler stalls the whole loop.
+        """
+        found = self.query("#banner")
+        if not found:
+            return
+        found.first(Static).update(
+            banner.markup(max(self.size.width, 8), tagline=False, face=self.mark_colour())
+        )
+
+    def mark_colour(self) -> str:
+        """The scrollbar's lit blue, read from the theme so the mark tracks it.
+
+        The resting scrollbar colour is too dark to fill a letterform with: it measures
+        about 1.5:1 against the background where a solid block needs three.
+        """
+        variables = getattr(self, "theme_variables", None) or {}
+        return str(variables.get("scrollbar-active") or banner.HEX[banner.FACE_COLOUR])
+
     def poll_card(self) -> None:
         """Only the card is re-read on the timer. The rest changes when a command runs."""
         self._fill_rows("#card", data.read_card().rows)
@@ -125,7 +161,10 @@ class Panel(App):
     # --- filling -------------------------------------------------------------------
 
     def _fill_models(self, snapshot: data.Snapshot) -> None:
-        select = self.query_one("#model", Select)
+        found = self.query("#model")
+        if not found:
+            return
+        select = found.first(Select)
         # Tracked here rather than read back off the widget: the widget's own list is
         # private and has moved between releases.
         if snapshot.models != self._listed:
@@ -135,7 +174,12 @@ class Panel(App):
             select.value = self.reference
 
     def _fill_rows(self, selector: str, rows: tuple[data.Row, ...]) -> None:
-        table = self.query_one(selector, DataTable)
+        # Asked for, not assumed. An event can arrive before the widget is mounted or
+        # after it is gone, and raising inside a handler stalls the whole loop.
+        found = self.query(selector)
+        if not found:
+            return
+        table = found.first(DataTable)
         if not table.columns:
             table.add_columns("label", "value", "note")
         table.clear()
@@ -159,7 +203,10 @@ class Panel(App):
         self._fill_rows("#alternatives", view.alternatives)
 
     def _fill_profiles(self, snapshot: data.Snapshot) -> None:
-        table = self.query_one("#profiles-table", DataTable)
+        found = self.query("#profiles-table")
+        if not found:
+            return
+        table = found.first(DataTable)
         table.clear()
         for view in snapshot.profiles:
             table.add_row(
@@ -177,7 +224,10 @@ class Panel(App):
 
     def _show_profile(self, view: data.ProfileView) -> None:
         self._fill_rows("#profile-detail", view.rows)
-        table = self.query_one("#history", DataTable)
+        found = self.query("#history")
+        if not found:
+            return
+        table = found.first(DataTable)
         table.clear()
         for entry in data.read_history(view.signature_id):
             table.add_row(

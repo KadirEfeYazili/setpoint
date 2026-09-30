@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from setpoint.model import ModelError, describe, resolve_ollama
+from setpoint.model import ModelError, describe, resolve, stores
 from setpoint.model.reader import ArraySummary, GgufHeader, TensorEntry
 
 
@@ -164,9 +164,12 @@ class TestDescription:
         assert info.parameter_label == "1.1K"
 
 
-class TestOllamaResolution:
-    def test_a_manifest_resolves_to_its_model_blob(self, tmp_path, monkeypatch):
+class TestNameResolution:
+    """Names are resolved out of the stores on this machine, not from any one product."""
+
+    def manifest_store(self, tmp_path, monkeypatch):
         monkeypatch.setenv("OLLAMA_MODELS", str(tmp_path))
+        monkeypatch.delenv("SETPOINT_MODELS_DIR", raising=False)
         blob = tmp_path / "blobs" / "sha256-abc"
         blob.parent.mkdir(parents=True)
         blob.write_bytes(b"gguf")
@@ -178,12 +181,58 @@ class TestOllamaResolution:
             '{"mediaType": "application/vnd.ollama.image.model", "digest": "sha256:abc"}]}',
             encoding="utf-8",
         )
-        assert resolve_ollama("demo:7b") == blob
+        return blob
 
-    def test_a_missing_tag_defaults_to_latest(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("OLLAMA_MODELS", str(tmp_path))
-        assert resolve_ollama("demo") is None
+    def test_a_manifest_resolves_to_the_file_it_points_at(self, tmp_path, monkeypatch):
+        blob = self.manifest_store(tmp_path, monkeypatch)
+        assert resolve("demo:7b").path == blob
 
-    def test_a_path_like_reference_is_not_a_manifest(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("OLLAMA_MODELS", str(tmp_path))
-        assert resolve_ollama("a/b/c/d:1") is None
+    def test_an_unknown_name_is_an_error_rather_than_a_guess(self, tmp_path, monkeypatch):
+        self.manifest_store(tmp_path, monkeypatch)
+        with pytest.raises(ModelError, match="no model file found"):
+            resolve("nothing-here")
+
+    def test_a_path_like_reference_is_not_a_name(self, tmp_path, monkeypatch):
+        self.manifest_store(tmp_path, monkeypatch)
+        with pytest.raises(ModelError):
+            resolve("a/b/c/d:1")
+
+    def test_a_file_path_wins_over_any_store(self, tmp_path, monkeypatch):
+        self.manifest_store(tmp_path, monkeypatch)
+        direct = tmp_path / "direct.gguf"
+        direct.write_bytes(b"gguf")
+        found = resolve(str(direct))
+        assert found.path == direct
+        assert found.source == "path"
+
+
+class TestStores:
+    def test_a_configured_directory_is_searched_first(self, tmp_path, monkeypatch):
+        # No store is privileged, and the one the user names comes before the rest.
+        monkeypatch.setenv("SETPOINT_MODELS_DIR", str(tmp_path))
+        assert stores()[0].root == tmp_path
+        assert stores()[0].label == "configured"
+
+    def test_several_directories_can_be_configured(self, tmp_path, monkeypatch):
+        import os
+
+        one, two = tmp_path / "one", tmp_path / "two"
+        monkeypatch.setenv("SETPOINT_MODELS_DIR", os.pathsep.join([str(one), str(two)]))
+        roots = [store.root for store in stores()]
+        assert roots[:2] == [one, two]
+
+    def test_a_plain_directory_resolves_by_file_name(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SETPOINT_MODELS_DIR", str(tmp_path))
+        (tmp_path / "my-model.gguf").write_bytes(b"gguf")
+        assert resolve("my-model").path == tmp_path / "my-model.gguf"
+        assert resolve("my-model.gguf").path == tmp_path / "my-model.gguf"
+
+    def test_a_missing_directory_is_listed_rather_than_dropped(self, tmp_path, monkeypatch):
+        # `doctor` says where it looked, and an empty list would hide that.
+        monkeypatch.setenv("SETPOINT_MODELS_DIR", str(tmp_path / "absent"))
+        assert any(not store.root.exists() for store in stores())
+
+    def test_every_store_says_what_layout_it_has(self):
+        from setpoint.model.index import FLAT, MANIFEST
+
+        assert all(store.layout in (FLAT, MANIFEST) for store in stores())

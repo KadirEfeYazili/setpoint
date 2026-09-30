@@ -132,6 +132,36 @@ class TestInteraction:
         drive(go())
 
 
+class TestResizing:
+    @pytest.mark.parametrize(
+        "size",
+        [(140, 44), (100, 44), (64, 44), (63, 44), (45, 30), (29, 24), (20, 24), (12, 20)],
+    )
+    def test_it_mounts_at_any_size(self, size):
+        # The mark changes form with the width and the height, and every one of those
+        # transitions used to be a chance to raise inside an event handler, which stalls
+        # the loop rather than failing loudly.
+        async def go():
+            app = Panel(reference="gemma3:1b", interval=60.0)
+            async with app.run_test(size=size) as pilot:
+                await pilot.pause()
+                assert app.query("#banner")
+
+        drive(go())
+
+    def test_highlighting_a_row_before_the_panes_exist_does_not_raise(self):
+        # Found by mounting at many sizes: the row-highlighted event arrived while
+        # `#profile-detail` was not there, and `query_one` raised inside the handler.
+        async def go():
+            app = Panel(reference="gemma3:1b", interval=60.0)
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                app._show_profile(PROFILE)
+                await pilot.pause()
+
+        drive(go())
+
+
 class TestEmptyMachine:
     def test_a_machine_with_nothing_measured_still_opens(self, monkeypatch):
         # The first thing a new user sees. It must not need a profile to exist.
