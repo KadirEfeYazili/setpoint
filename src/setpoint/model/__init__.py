@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from .analyze import LATENT_ATTENTION_ARCHITECTURES, analyze, describe
+from .index import ResolvedModel, Store, local_models, resolve, stores
 from .reader import GgufError, GgufHeader, TensorEntry, read_header
-from .resolve import ResolvedModel, local_models, resolve, resolve_ollama
 from .types import Attention, Experts, ModelError, ModelInfo, QuantShare, Weights
 
 __all__ = [
@@ -17,6 +17,7 @@ __all__ = [
     "ModelInfo",
     "QuantShare",
     "ResolvedModel",
+    "Store",
     "TensorEntry",
     "Weights",
     "analyze",
@@ -24,5 +25,5 @@ __all__ = [
     "local_models",
     "read_header",
     "resolve",
-    "resolve_ollama",
+    "stores",
 ]
