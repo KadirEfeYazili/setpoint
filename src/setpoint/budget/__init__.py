@@ -11,6 +11,8 @@ from .overhead import (
     runtime_allowance,
 )
 from .planner import fit, max_context, plan, seed_candidates
+from .promptcache import DEFAULT_CACHE_RAM_MIB, PromptCacheEstimate
+from .promptcache import estimate as estimate_prompt_cache
 from .types import (
     GIB,
     MIB,
@@ -31,6 +33,7 @@ from .vram import (
 __all__ = [
     "CACHE_TYPES",
     "CALIBRATION",
+    "DEFAULT_CACHE_RAM_MIB",
     "DEFAULT_FRAGMENTATION_PCT",
     "DEFAULT_RUNTIME_ALLOWANCE_BYTES",
     "DEFAULT_UBATCH",
@@ -41,10 +44,12 @@ __all__ = [
     "Candidate",
     "KvEstimate",
     "OffloadPlan",
+    "PromptCacheEstimate",
     "RuntimeAllowance",
     "VramBudget",
     "assumed",
     "estimate_kv",
+    "estimate_prompt_cache",
     "fit",
     "from_snapshot",
     "max_context",

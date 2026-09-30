@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from ..model import ModelInfo
 from . import kv as kv_module
+from . import promptcache
 from .types import Alternative, BudgetPlan, Candidate, KvEstimate, OffloadPlan, VramBudget
 
 # Contexts worth suggesting when the request does not fit.
@@ -39,6 +40,7 @@ def plan(
     cache_type_k: str = "f16",
     cache_type_v: str = "f16",
     host_ram_bytes: int | None = None,
+    cache_ram_mib: int = promptcache.DEFAULT_CACHE_RAM_MIB,
 ) -> BudgetPlan:
     """Build the full budget for one model, context and card.
 
@@ -46,6 +48,7 @@ def plan(
     """
     estimate = kv_module.estimate(model, context, cache_type_k, cache_type_v)
     offload = fit(model, estimate, vram.ceiling_bytes)
+    cache = promptcache.estimate(estimate, cache_ram_mib)
 
     notes = list(model.notes)
     if estimate is None:
@@ -61,6 +64,9 @@ def plan(
             f"reading the model will cache up to {model.file_bytes / (1024**3):.2f} GiB more. "
             "Close something before measuring."
         )
+    collision = promptcache.pressure_note(cache, offload.cpu_bytes, host_ram_bytes)
+    if collision:
+        notes.append(collision)
 
     return BudgetPlan(
         model=model,
@@ -68,6 +74,7 @@ def plan(
         vram=vram,
         offload=offload,
         kv=estimate,
+        prompt_cache=cache,
         alternatives=alternatives(model, vram, offload, context, cache_type_k, cache_type_v),
         candidates=seed_candidates(model, offload, cache_type_k, cache_type_v),
         host_ram_bytes=host_ram_bytes,
