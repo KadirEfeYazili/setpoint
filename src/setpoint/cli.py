@@ -1438,7 +1438,9 @@ def _run_strategies(open_session, corpus, args, style) -> tuple[list[chunking.Re
     if costly:
         session = open_session()
         with session:
-            provider = chunking.server_embeddings(session.base)
+            provider = chunking.server_embeddings(
+                session.base, tokenizer=chunking.local_tokenizer(ratio)
+            )
             for name in costly:
                 results.append(
                     _repeat(by_name[name], "character", provider, corpus, sizes, args, style)
