@@ -99,7 +99,49 @@ def chonkie_tokenizer(base: str):
     return ChonkieServerTokenizer()
 
 
-def server_embeddings(base: str, dimension: int | None = None):
+def local_tokenizer(characters_per_token: float = 4.0):
+    """A token counter that costs nothing, calibrated against the real one.
+
+    A semantic chunker asks for a token count per sentence. Answering each of those
+    over HTTP costs a round trip and is charged to the strategy: the embedding pass is
+    the real cost of semantic chunking, the counting is the instrument. So the counts
+    come from a ratio measured once against the served tokenizer.
+    """
+    from chonkie.tokenizer import Tokenizer
+
+    class CalibratedTokenizer(Tokenizer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.ratio = characters_per_token or 4.0
+
+        def encode(self, text: str) -> list[int]:
+            return list(range(self.count_tokens(text)))
+
+        def decode(self, tokens) -> str:
+            return ""
+
+        def tokenize(self, text: str) -> list[int]:
+            return self.encode(text)
+
+        def count_tokens(self, text: str) -> int:
+            return max(1, int(len(text) / self.ratio)) if text else 0
+
+        def encode_batch(self, texts) -> list[list[int]]:
+            return [self.encode(text) for text in texts]
+
+        def decode_batch(self, batch) -> list[str]:
+            return ["" for _ in batch]
+
+        def count_tokens_batch(self, texts) -> list[int]:
+            return [self.count_tokens(text) for text in texts]
+
+        def __repr__(self) -> str:
+            return f"CalibratedTokenizer({self.ratio:.2f} chars/token)"
+
+    return CalibratedTokenizer()
+
+
+def server_embeddings(base: str, dimension: int | None = None, tokenizer=None):
     """A chonkie embedding provider backed by a local server.
 
     Built here rather than imported so that nothing in this module requires the extra
@@ -114,9 +156,10 @@ def server_embeddings(base: str, dimension: int | None = None):
             super().__init__()
             self.base = base.rstrip("/")
             # The library builds its own tokenizer from whatever this returns and
-            # dispatches on type, so the adapter is what has to come back, not the
-            # plain counter.
-            self._tokenizer = chonkie_tokenizer(self.base)
+            # dispatches on type, so an adapter has to come back rather than the plain
+            # counter. It defaults to the calibrated one: the served tokenizer here
+            # would add a round trip per sentence.
+            self._tokenizer = tokenizer or local_tokenizer()
             self._dimension = dimension
 
         @property

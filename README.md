@@ -13,7 +13,7 @@ measurement-driven configuration for local inference
 `setpoint` finds the configuration your hardware can actually hold, by measuring it
 instead of guessing, and remembers the answer.
 
-> **Status: early development.** All sixteen commands run, and have been used to
+> **Status: early development.** All seventeen commands run, and have been used to
 > measure real hardware. Nothing is published to a package index yet.
 > See [Roadmap](#roadmap).
 
@@ -91,10 +91,12 @@ setpoint doctor
 ```
 
 Requires Python 3.10+ and, for GPU checks, an NVIDIA driver. The core has two
-dependencies. `setpoint panel` needs one more and is an optional extra:
+dependencies. Two commands need more and both are optional extras, so `doctor` and
+`budget` keep working with nothing else installed:
 
 ```bash
-uv pip install -e ".[tui]"
+uv pip install -e ".[tui]"      # setpoint panel
+uv pip install -e ".[chunk]"    # setpoint chunk
 ```
 
 Measuring throughput needs a llama.cpp build on `PATH`. If the binaries live elsewhere,
@@ -122,6 +124,7 @@ setpoint chat MODEL                  # talk to it, with each answer's cost besid
 setpoint route --tokens N            # which measured model answers, switch cost included
 setpoint spec MODEL                  # whether speculative decoding pays here, per workload
 setpoint quant MODEL -f CORPUS       # compare local quantizations: speed, VRAM, drift
+setpoint chunk CORPUS                # what each chunking strategy costs here
 setpoint residency                   # who holds the card, and what the policy would do
 setpoint export --target NAME        # runner configuration from the measured profiles
 setpoint top                         # live: VRAM, shared memory, throttle
@@ -135,8 +138,8 @@ could not complete the check. Data goes to stdout and diagnostics to stderr, so 
 command composes with `jq` and shell pipelines.
 
 `--json` is accepted by `doctor`, `hardware`, `budget`, `tune`, `bench`, `route`,
-`spec`, `quant`, `residency`, `status` and `profile`. `export` writes its own format,
-`top`, `panel` and `chat` are screens, and `run` hands over to the server.
+`spec`, `quant`, `chunk`, `residency`, `status` and `profile`. `export` writes its own
+format, `top`, `panel` and `chat` are screens, and `run` hands over to the server.
 
 A first session, in order:
 
