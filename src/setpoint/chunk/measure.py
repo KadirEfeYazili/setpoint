@@ -88,6 +88,7 @@ class Result:
     tokens_p90: float
     peak_vram_mib: int | None
     sampled: int = 0
+    spread: float = 0.0
     detail: str | None = None
 
     @property
@@ -202,3 +203,27 @@ def _texts(chunks: Iterable[object]) -> list[str]:
         text = getattr(chunk, "text", None)
         out.append(text if isinstance(text, str) else str(chunk))
     return out
+
+
+def pick(runs: list[Result]) -> Result:
+    """The middle run by time, carrying how far the repetitions disagreed.
+
+    A single timing of a strategy that finishes in a tenth of a second says nothing,
+    and a median without its spread hides that.
+    """
+    if not runs:
+        return Result("unknown", 0.0, 0, 0.0, 0.0, None, detail="no runs")
+    ordered = sorted(runs, key=lambda r: r.seconds)
+    middle = ordered[len(ordered) // 2]
+    quickest, slowest = ordered[0].seconds, ordered[-1].seconds
+    spread = (slowest - quickest) / middle.seconds if middle.seconds else 0.0
+    return Result(
+        strategy=middle.strategy,
+        seconds=middle.seconds,
+        chunks=middle.chunks,
+        tokens_median=middle.tokens_median,
+        tokens_p90=middle.tokens_p90,
+        peak_vram_mib=max((r.peak_vram_mib or 0) for r in runs) or None,
+        sampled=middle.sampled,
+        spread=spread,
+    )

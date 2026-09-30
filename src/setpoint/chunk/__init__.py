@@ -17,6 +17,7 @@ from .measure import (
     Document,
     Result,
     calibrate,
+    pick,
     read_corpus,
     run,
 )
@@ -42,6 +43,7 @@ __all__ = [
     "available",
     "by_name",
     "calibrate",
+    "pick",
     "chonkie_tokenizer",
     "read_corpus",
     "run",
