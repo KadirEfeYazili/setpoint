@@ -20,6 +20,7 @@ from . import (
     __version__,
     banner,
     budget,
+    chat,
     doctor,
     export,
     monitor,
@@ -27,6 +28,7 @@ from . import (
     quant,
     route,
     sentinel,
+    serve,
     speculate,
     tune,
 )
@@ -43,6 +45,7 @@ from .backend import (
     select_device,
     server_argv,
 )
+from .hardware import GpuWatcher
 from .hardware import probe as probe_hardware
 from .model import ModelError, analyze, local_models, resolve
 from .render import (
@@ -1146,6 +1149,158 @@ def cmd_bench(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_chat(args: argparse.Namespace) -> int:
+    """Talk to the model on the configuration that was measured for it."""
+    style = Style(color_enabled())
+    enable_unicode_output()
+    profile, model, snapshot, code = _stored_profile(args, style)
+    if profile is None:
+        return code
+
+    server = find_server_binary()
+    if server is None:
+        print(
+            f"setpoint: {SERVER_BINARY_NAME} was not found. Put it on PATH or set "
+            f"{SERVER_ENV_VAR}.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+
+    backend = LlamaCppBackend()
+    devices: tuple[str, ...] = ()
+    try:
+        listing = backend.devices()
+    except BackendError:
+        listing = ()
+    chosen = select_device(listing, args.device or profile.signature.gpu) if listing else None
+    if chosen is not None and len(listing) > 1:
+        devices = (chosen.id,)
+
+    print(style.bold("model"))
+    print(f"  {profiles.signature_id(profile.signature)}   {profile.model.label}")
+    _row(style, "measured", f"{profile.measurement.decode_tok_s.median:.2f} t/s", profile.created)
+    _row(style, "context", str(profile.target.context))
+    if profile.config.spec_type:
+        _row(style, "speculator", profile.config.spec_type, "measured to help here")
+    print(style.dim("\n  starting the server with the measured configuration"))
+
+    session = serve.Session(
+        binary=server,
+        model_path=profile.model.path or model.path,
+        config=profile.config,
+        context=profile.target.context,
+        devices=devices,
+    )
+    try:
+        with session:
+            return _chat_loop(session, profile, args, style)
+    except BackendError as exc:
+        print(f"setpoint: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+
+def _chat_loop(
+    session: serve.Session,
+    profile: profiles.Profile,
+    args: argparse.Namespace,
+    style: Style,
+) -> int:
+    conversation = chat.Conversation(system=args.system)
+    count = chat.token_counter(session.base)
+    gpu_index = None
+    print(style.green("  ready"), style.dim("-- /help for commands, /exit to stop"))
+
+    while True:
+        try:
+            line = input(style.bold("\nyou  ")).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not line:
+            continue
+        if line.startswith("/"):
+            if _command(line, conversation, profile, style) is False:
+                break
+            continue
+
+        conversation.add(chat.Turn("user", line))
+        dropped = chat.trim(conversation, profile.target.context, count, args.reserve)
+        if dropped:
+            print(style.grey(f"  dropped {dropped} older turn(s) to stay inside the context"))
+
+        print(style.bold("\nmodel"))
+        watcher = GpuWatcher(gpu_index)
+        pieces: list[str] = []
+        try:
+            with watcher:
+                for piece in session.stream(
+                    conversation.messages(), max_tokens=args.tokens, temperature=args.temperature
+                ):
+                    pieces.append(piece)
+                    print(piece, end="", flush=True)
+        except (OSError, ValueError) as exc:
+            print(style.red(f"\n  the server stopped answering: {exc}"))
+            break
+        print()
+
+        text = "".join(pieces)
+        # The stream carries no timings, so the same server is asked for them after the
+        # text has been shown. Its counters are per-request and still the last ones.
+        reply = session.complete([{"role": "user", "content": "."}], max_tokens=1, temperature=0)
+        answer = chat.Turn(
+            role="assistant",
+            text=text,
+            decode_tok_s=reply.decode_tok_s,
+            tokens=count(text),
+            peak_vram_mib=watcher.result.peak_vram_mib,
+            speculator=profile.config.spec_type,
+        )
+        conversation.add(answer)
+        _render_cost(answer, profile, style)
+    return EXIT_OK
+
+
+def _render_cost(turn: chat.Turn, profile: profiles.Profile, style: Style) -> None:
+    """What the answer cost, next to what the profile said it would."""
+    bits = []
+    if turn.tokens is not None:
+        bits.append(f"{turn.tokens} tokens")
+    if turn.decode_tok_s is not None:
+        claimed = profile.measurement.decode_tok_s.median
+        drift = f" ({turn.decode_tok_s / claimed - 1:+.0%} on the profile)" if claimed else ""
+        bits.append(f"{turn.decode_tok_s:.1f} t/s{drift}")
+    if turn.peak_vram_mib is not None:
+        bits.append(f"peak {turn.peak_vram_mib} MiB")
+    if bits:
+        print(style.dim("  " + "   ".join(bits)))
+
+
+def _command(
+    line: str, conversation: chat.Conversation, profile: profiles.Profile, style: Style
+) -> bool:
+    """Handle a slash command. Returns False when the conversation should end."""
+    name = line.split()[0].lower()
+    if name in ("/exit", "/quit"):
+        return False
+    if name == "/reset":
+        conversation.clear()
+        print(style.dim("  the conversation was cleared"))
+        return True
+    if name == "/stats":
+        rate = conversation.rate
+        _row(style, "turns", str(len(conversation.turns)))
+        _row(style, "dropped", str(conversation.dropped), "to stay inside the context")
+        _row(
+            style,
+            "median so far",
+            f"{rate:.2f} t/s" if rate else "-",
+            f"profile claims {profile.measurement.decode_tok_s.median:.2f}",
+        )
+        return True
+    print(style.dim("  /reset  /stats  /exit"))
+    return True
+
+
 def cmd_panel(args: argparse.Namespace) -> int:
     """Open the panel, or say what to install."""
     if not panel.available():
@@ -2120,6 +2275,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_bench.add_argument("--json", action="store_true", help="emit machine-readable output")
     p_bench.set_defaults(func=cmd_bench)
+
+    p_chat = sub.add_parser(
+        "chat",
+        help="talk to a model on its measured configuration",
+        description=(
+            "Starts the engine with the configuration measured for this model and this "
+            "machine, then talks to it. Every answer arrives with its own throughput "
+            "and peak VRAM, against what the profile claimed."
+        ),
+    )
+    p_chat.add_argument(
+        "model", help="path to a .gguf file, or the name of a model on this machine"
+    )
+    p_chat.add_argument(
+        "-c", "--context", type=int, help="pick the profile measured for this context"
+    )
+    p_chat.add_argument("--device", metavar="NAME", help="accelerator to run on")
+    p_chat.add_argument(
+        "--system", metavar="TEXT", help="system prompt to put in front of the conversation"
+    )
+    p_chat.add_argument(
+        "--tokens", type=int, default=512, metavar="N", help="most tokens in one answer"
+    )
+    p_chat.add_argument(
+        "--temperature", type=float, default=0.7, metavar="T", help="sampling temperature"
+    )
+    p_chat.add_argument(
+        "--reserve",
+        type=int,
+        default=chat.DEFAULT_RESERVE,
+        metavar="N",
+        help="tokens of context kept free for the answer",
+    )
+    p_chat.set_defaults(func=cmd_chat)
 
     p_panel = sub.add_parser(
         "panel",

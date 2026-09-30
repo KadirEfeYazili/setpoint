@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from setpoint import speculate
 from setpoint.measure import Statistic
-from setpoint.profile import Config
 
 PROSE = speculate.DEFAULT_WORKLOADS[0]
 
