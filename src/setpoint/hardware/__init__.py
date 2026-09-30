@@ -17,6 +17,7 @@ from .types import (
     MIB,
     AdapterMemory,
     DriverInfo,
+    GpuProcess,
     GpuSample,
     GpuStatic,
     HardwareSnapshot,
@@ -33,6 +34,7 @@ __all__ = [
     "DEFAULT_INTERVAL_S",
     "AdapterMemory",
     "DriverInfo",
+    "GpuProcess",
     "GpuSample",
     "GpuStatic",
     "GpuWatch",
@@ -132,6 +134,7 @@ def probe(include_wddm: bool = True) -> HardwareSnapshot:
         driver = nvml.driver_info()
         gpus = nvml.gpus() if nvml.ok else ()
         samples = nvml.sample() if nvml.ok else ()
+        processes = nvml.processes() if nvml.ok else ()
         if not nvml.ok and nvml.detail:
             notes.append(f"nvml: {nvml.detail}")
 
@@ -147,5 +150,6 @@ def probe(include_wddm: bool = True) -> HardwareSnapshot:
         gpus=gpus,
         samples=samples,
         adapters=adapters,
+        processes=processes,
         notes=tuple(notes),
     )

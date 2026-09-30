@@ -11,7 +11,7 @@ import contextlib
 from collections.abc import Iterator
 from typing import Any
 
-from .types import DriverInfo, GpuSample, GpuStatic, ProbeStatus
+from .types import MIB, DriverInfo, GpuProcess, GpuSample, GpuStatic, ProbeStatus
 
 # Stable ABI constants, hardcoded because bindings disagree on the exported names.
 _THROTTLE_BITS: tuple[tuple[int, str], ...] = (
@@ -186,6 +186,35 @@ class NvmlProbe:
                 )
             )
         return tuple(out)
+
+    def processes(self) -> tuple[GpuProcess, ...]:
+        """Processes holding the card, with their memory where the driver attributes it.
+
+        Both lists are asked for and merged: a llama.cpp build on Vulkan appears as a
+        graphics client, a CUDA one as a compute client. Measured on this machine, the
+        driver names every process and sizes none of them.
+        """
+        found: dict[int, GpuProcess] = {}
+        for _, handle in self._handles():
+            for call in (
+                "nvmlDeviceGetComputeRunningProcesses_v3",
+                "nvmlDeviceGetGraphicsRunningProcesses_v3",
+            ):
+                alt = (call.replace("_v3", "_v2"), call.replace("_v3", ""))
+                for info in self._try(call, handle, alt_names=alt) or ():
+                    pid = int(getattr(info, "pid", 0))
+                    if not pid:
+                        continue
+                    used = getattr(info, "usedGpuMemory", None)
+                    found.setdefault(
+                        pid,
+                        GpuProcess(
+                            pid=pid,
+                            name=_decode(self._try("nvmlSystemGetProcessName", pid)),
+                            vram_mib=used // MIB if used else None,
+                        ),
+                    )
+        return tuple(sorted(found.values(), key=lambda p: p.pid))
 
     def sample(self) -> tuple[GpuSample, ...]:
         out: list[GpuSample] = []
