@@ -177,3 +177,59 @@ class TestPort:
 
     def test_two_asks_do_not_collide(self):
         assert serve.free_port() != serve.free_port()
+
+
+class TestPinningTheCard:
+    """A preference is resolved by name; with none, the first device is not the answer.
+
+    On this laptop the backend lists the integrated GPU first, so defaulting to it
+    silently measures the wrong chip while every other reading still describes the
+    discrete card. It has happened three times, twice to measurement probes.
+    """
+
+    def device(self, ident, name):
+        from setpoint.backend import BackendDevice
+
+        return BackendDevice(id=ident, name=name)
+
+    def listing(self, monkeypatch, *devices):
+        monkeypatch.setattr(
+            serve.LlamaCppBackend, "devices", lambda self: tuple(devices), raising=False
+        )
+
+    def test_a_named_preference_wins_over_position(self, monkeypatch):
+        igpu = self.device("Vulkan0", "Intel(R) Iris(R) Xe Graphics")
+        dgpu = self.device("Vulkan1", "NVIDIA GeForce GTX 1650")
+        self.listing(monkeypatch, igpu, dgpu)
+        flags, chosen = serve.pin_device("NVIDIA GeForce GTX 1650")
+        assert flags == ("Vulkan1",)
+        assert chosen is dgpu
+
+    def test_with_no_preference_the_budgeted_card_is_asked_for(self, monkeypatch):
+        igpu = self.device("Vulkan0", "Intel(R) Iris(R) Xe Graphics")
+        dgpu = self.device("Vulkan1", "NVIDIA GeForce GTX 1650")
+        self.listing(monkeypatch, igpu, dgpu)
+        monkeypatch.setattr(serve, "_budgeted_card", lambda: "NVIDIA GeForce GTX 1650")
+        flags, chosen = serve.pin_device(None)
+        assert chosen is dgpu
+
+    def test_a_caller_can_override_which_card_that_is(self, monkeypatch):
+        igpu = self.device("Vulkan0", "Intel(R) Iris(R) Xe Graphics")
+        dgpu = self.device("Vulkan1", "NVIDIA GeForce GTX 1650")
+        self.listing(monkeypatch, igpu, dgpu)
+        _, chosen = serve.pin_device(None, fallback="Iris")
+        assert chosen is igpu
+
+    def test_one_device_needs_no_flag(self, monkeypatch):
+        only = self.device("Vulkan0", "NVIDIA GeForce GTX 1650")
+        self.listing(monkeypatch, only)
+        flags, chosen = serve.pin_device(None)
+        assert flags == ()
+        assert chosen is only
+
+    def test_a_backend_that_cannot_be_asked_pins_nothing(self, monkeypatch):
+        def raise_it(self):
+            raise serve.BackendError("llama-bench not found")
+
+        monkeypatch.setattr(serve.LlamaCppBackend, "devices", raise_it, raising=False)
+        assert serve.pin_device(None) == ((), None)
