@@ -13,7 +13,7 @@ measurement-driven configuration for local inference
 `setpoint` finds the configuration your hardware can actually hold, by measuring it
 instead of guessing, and remembers the answer.
 
-> **Status: early development.** All fourteen commands run, and have been used to
+> **Status: early development.** All fifteen commands run, and have been used to
 > measure real hardware. Nothing is published to a package index yet.
 > See [Roadmap](#roadmap).
 
@@ -118,6 +118,7 @@ setpoint budget MODEL -c N           # where the split has to fall, running noth
 setpoint tune MODEL -c N             # measure a configuration and write a profile
 setpoint bench MODEL                 # re-measure a profile, say whether it still holds
 setpoint run MODEL -- ARGS           # start llama-server with the measured profile
+setpoint chat MODEL                  # talk to it, with each answer's cost beside it
 setpoint route --tokens N            # which measured model answers, switch cost included
 setpoint spec MODEL                  # whether speculative decoding pays here, per workload
 setpoint quant MODEL -f CORPUS       # compare local quantizations: speed, VRAM, drift
@@ -133,8 +134,8 @@ could not complete the check. Data goes to stdout and diagnostics to stderr, so 
 command composes with `jq` and shell pipelines.
 
 `--json` is accepted by `doctor`, `hardware`, `budget`, `tune`, `bench`, `route`,
-`spec`, `quant`, `status` and `profile`. `export` writes its own format, `top` and
-`panel` are screens, and `run` hands over to the server.
+`spec`, `quant`, `status` and `profile`. `export` writes its own format, `top`, `panel`
+and `chat` are screens, and `run` hands over to the server.
 
 A first session, in order:
 
@@ -143,6 +144,7 @@ setpoint doctor                      # fix what it reports before measuring anyt
 setpoint budget qwen2.5:3b -c 4096   # see the tradeoff
 setpoint tune qwen2.5:3b -c 4096     # measure it, write the profile
 setpoint run qwen2.5:3b              # use it
+setpoint chat qwen2.5:3b             # or talk to it and watch what it costs
 setpoint bench qwen2.5:3b            # later: is it still true
 ```
 
@@ -271,6 +273,37 @@ the profile still holds
 
 It exits 1 when the difference leaves the tolerance, which makes it usable from a
 scheduler.
+
+## Talking to it
+
+`chat` starts the engine with the measured configuration and talks to it. There is no
+proxy and no endpoint of its own: the server exists while the conversation does.
+
+```
+$ setpoint chat gemma3:1b
+
+model
+  a748e45f1a843e88   gemma3 Q4_K_M
+  running on Vulkan1 -- NVIDIA GeForce GTX 1650
+  measured               86.71 t/s   2026-09-09T12:23:24Z
+  context                     4096
+  speculator            ngram-simple   measured to help here
+
+you  Write a short paragraph about why measurement beats estimation.
+
+model
+Precise measurement provides a robust foundation for understanding and comparison...
+  61 tokens   81.9 t/s (-5% on the profile)   peak 1509 MiB
+```
+
+Every answer carries what it cost and how that compares with the profile, which is the
+only way to notice that a machine has drifted while you are using it rather than when
+you next run `bench`. The accelerator is named for the same reason it is named during
+tuning: device ids are positional, and a reboot can renumber them.
+
+The context is kept by asking the server's own tokenizer how long the conversation is,
+not by estimating from character counts, and the oldest exchanges are dropped in pairs
+when it no longer fits.
 
 ## Roadmap
 

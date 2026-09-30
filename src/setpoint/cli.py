@@ -1178,6 +1178,10 @@ def cmd_chat(args: argparse.Namespace) -> int:
 
     print(style.bold("model"))
     print(f"  {profiles.signature_id(profile.signature)}   {profile.model.label}")
+    if chosen is not None:
+        # Printed because the ids are positional and a reboot renumbers them. Resolving
+        # by name is what keeps this right; showing it is what makes a wrong one visible.
+        print(f"  {style.dim('running on ' + chosen.id + ' -- ' + chosen.name)}")
     _row(style, "measured", f"{profile.measurement.decode_tok_s.median:.2f} t/s", profile.created)
     _row(style, "context", str(profile.target.context))
     if profile.config.spec_type:
