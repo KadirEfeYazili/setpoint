@@ -1361,18 +1361,20 @@ def cmd_chunk(args: argparse.Namespace) -> int:
     print(f"  {embedder.name or embedder.architecture}   {gib(embedder.weights.total_bytes)}")
     if chosen is not None:
         print(f"  {style.dim('running on ' + chosen.id + ' -- ' + chosen.name)}")
+    print(style.dim("  started only for the strategies that need it"))
 
-    session = serve.Session(
-        binary=server,
-        model_path=embedder.path,
-        config=_EmbedConfig(),
-        context=args.embed_context,
-        devices=devices,
-        extra=("--embedding", "--pooling", "mean"),
-    )
+    def open_session() -> serve.Session:
+        return serve.Session(
+            binary=server,
+            model_path=embedder.path,
+            config=_EmbedConfig(),
+            context=args.embed_context,
+            devices=devices,
+            extra=("--embedding", "--pooling", "mean"),
+        )
+
     try:
-        with session:
-            results, ratio = _run_strategies(session, corpus, args, style)
+        results, ratio = _run_strategies(open_session, corpus, args, style)
     except BackendError as exc:
         print(f"setpoint: {exc}", file=sys.stderr)
         return EXIT_ERROR
@@ -1398,17 +1400,27 @@ class _EmbedConfig:
     threads = None
 
 
-def _run_strategies(session, corpus, args, style) -> tuple[list[chunking.Result], float]:
-    """Run each strategy in turn, saying which is being measured as it goes."""
-    tokenizer = chunking.ServerTokenizer(session.base)
-    embedder = None
-    results = []
-    wanted = args.strategy or None
+def _run_strategies(open_session, corpus, args, style) -> tuple[list[chunking.Result], float]:
+    """Run each strategy, cheapest first, starting the embedder only when one needs it.
 
-    # The chunkers are driven on characters, converted once against the real tokenizer.
-    # Asking the server per candidate split turned a 1.4 s strategy into 47 s, and the
-    # table would have charged that to the strategy.
-    ratio = chunking.calibrate(corpus, tokenizer.count_tokens)
+    Order matters for the VRAM column: a strategy that runs no model must be measured
+    while no model is loaded, or the table charges it for the embedder that the next
+    strategy needs.
+    """
+    wanted = args.strategy or None
+    chosen = [s for s in chunking.strategies(1) if not wanted or s.name in wanted]
+    cheap = [s.name for s in chosen if not s.needs_embeddings]
+    costly = [s.name for s in chosen if s.needs_embeddings]
+
+    session = open_session()
+    with session:
+        tokenizer = chunking.ServerTokenizer(session.base)
+        # The chunkers are driven on characters, converted once against the real
+        # tokenizer. Asking the server per candidate split turned a 1.4 s strategy into
+        # 47 s, and the table would have charged that to the strategy.
+        ratio = chunking.calibrate(corpus, tokenizer.count_tokens)
+        sizes = _chunk_sizes(corpus, tokenizer.count_tokens)
+
     chunk_chars = max(1, int(args.chunk_tokens * ratio))
     print(
         style.dim(
@@ -1416,34 +1428,72 @@ def _run_strategies(session, corpus, args, style) -> tuple[list[chunking.Result]
             f"{args.chunk_tokens} tokens is about {chunk_chars} characters"
         )
     )
-    for strategy in chunking.strategies(chunk_chars):
-        if wanted and strategy.name not in wanted:
-            continue
-        if strategy.needs_embeddings and embedder is None:
-            embedder = chunking.server_embeddings(session.base)
-        print(style.dim(f"  measuring {strategy.name}..."), flush=True)
-        try:
-            chunker = strategy.build("character", embedder)
-        except Exception as exc:  # noqa: BLE001
-            results.append(chunking.Result(strategy.name, 0.0, 0, 0.0, 0.0, None, detail=str(exc)))
-            continue
-        results.append(chunking.run(strategy, chunker, corpus, tokenizer.count_tokens))
+
+    results: list[chunking.Result] = []
+    by_name = {s.name: s for s in chunking.strategies(chunk_chars)}
+
+    for name in cheap:
+        results.append(_repeat(by_name[name], "character", None, corpus, sizes, args, style))
+
+    if costly:
+        session = open_session()
+        with session:
+            provider = chunking.server_embeddings(session.base)
+            for name in costly:
+                results.append(
+                    _repeat(by_name[name], "character", provider, corpus, sizes, args, style)
+                )
     return results, ratio
+
+
+def _chunk_sizes(corpus, count_tokens):
+    """A token counter that does not need the server to stay up.
+
+    Sizes are measured after the clock stops, but the server is closed by then for the
+    cheap strategies, so the ratio measured above stands in for it.
+    """
+    ratio = chunking.calibrate(corpus, count_tokens)
+    return lambda text: max(1, int(len(text) / ratio)) if text else 0
+
+
+def _repeat(strategy, tokenizer, provider, corpus, sizes, args, style) -> chunking.Result:
+    """Measure one strategy several times and keep the middle run.
+
+    The first is a warm-up and the spread is reported: a single run of a strategy that
+    finishes in a tenth of a second says nothing.
+    """
+    print(style.dim(f"  measuring {strategy.name}..."), flush=True)
+    runs: list[chunking.Result] = []
+    for _ in range(args.runs + 1):
+        try:
+            chunker = strategy.build(tokenizer, provider)
+        except Exception as exc:  # noqa: BLE001
+            return chunking.Result(strategy.name, 0.0, 0, 0.0, 0.0, None, detail=str(exc))
+        runs.append(chunking.run(strategy, chunker, corpus, sizes))
+        if not runs[-1].ok:
+            return runs[-1]
+    return chunking.pick(runs[1:])
 
 
 def _render_chunk(corpus, results, args, style) -> None:
     print(style.bold(f"\nstrategies   chunks of {args.chunk_tokens} tokens"))
-    header = f"  {'strategy':<12}{'time':>9}{'MB/s':>8}{'chunks':>9}{'tokens':>9}{'peak vram':>12}"
+    header = (
+        f"  {'strategy':<12}{'time':>9}{'spread':>8}{'MB/s':>8}{'chunks':>8}"
+        f"{'tokens':>8}{'model':>7}{'peak vram':>12}"
+    )
     print(style.dim(header))
     for result in results:
         if not result.ok:
             print(f"  {result.strategy:<12}{style.red('did not run')}   {result.detail}")
             continue
+        strategy = chunking.by_name(result.strategy, 1)
+        runs_model = bool(strategy and strategy.needs_embeddings)
         peak = f"{result.peak_vram_mib} MiB" if result.peak_vram_mib else "-"
+        flag = "" if result.spread <= 0.05 else "  !"
         print(
-            f"  {result.strategy:<12}{result.seconds:>8.1f}s"
-            f"{result.throughput(corpus.total_bytes):>8.2f}{result.chunks:>9}"
-            f"{result.tokens_median:>9.0f}{peak:>12}"
+            f"  {result.strategy:<12}{result.seconds:>8.2f}s{result.spread:>7.1%}"
+            f"{result.throughput(corpus.total_bytes):>8.2f}{result.chunks:>8}"
+            f"{result.tokens_median:>8.0f}{'yes' if runs_model else 'no':>7}{peak:>12}{flag}"
         )
 
     print(style.bold(f"\nwhat retrieving {args.k} of them costs"))
@@ -1471,21 +1521,36 @@ def _chunk_notes(results) -> list[str]:
         return notes
     quickest = min(ran, key=lambda r: r.seconds)
     slowest = max(ran, key=lambda r: r.seconds)
-    if slowest.seconds > quickest.seconds * 2:
+    if slowest.seconds > quickest.seconds * 2 and slowest.seconds > 1.0:
         notes.append(
             f"{slowest.strategy} took {slowest.seconds / quickest.seconds:.0f} times as long "
             f"as {quickest.strategy}. Whether it retrieves better is not measured here: "
             "quality needs a labelled set, and without one setpoint makes no claim."
         )
-    held = [r for r in ran if r.peak_vram_mib]
-    if held:
-        top = max(held, key=lambda r: r.peak_vram_mib or 0)
+    embedding = [r for r in ran if (chunking.by_name(r.strategy, 1) or _NONE).needs_embeddings]
+    plain = [r for r in ran if r not in embedding]
+    if embedding and plain:
+        with_model = max(embedding, key=lambda r: r.peak_vram_mib or 0)
+        without = max(plain, key=lambda r: r.peak_vram_mib or 0)
+        if with_model.peak_vram_mib and without.peak_vram_mib:
+            notes.append(
+                f"the card held {without.peak_vram_mib} MiB while the strategies that run "
+                f"no model were measured and {with_model.peak_vram_mib} MiB during "
+                f"{with_model.strategy}. The difference is what the embedder takes away "
+                "from the model that has to answer, and the figures include whatever else "
+                "is on the card."
+            )
+    wide = [r for r in ran if r.spread > 0.05]
+    if wide:
         notes.append(
-            f"peak VRAM during {top.strategy} was {top.peak_vram_mib} MiB, all of it the "
-            "embedder and whatever else holds the card. That memory is not available to "
-            "the model that has to answer."
+            "runs marked ! varied by more than 5% between repetitions, so their timings "
+            "are not reliable. A larger corpus is the fix, not more runs."
         )
     return notes
+
+
+class _NONE:
+    needs_embeddings = False
 
 
 def _chunk_mapping(corpus, results, args, ratio: float) -> dict[str, Any]:
@@ -1503,6 +1568,8 @@ def _chunk_mapping(corpus, results, args, ratio: float) -> dict[str, Any]:
             {
                 "strategy": r.strategy,
                 "seconds": r.seconds,
+                "spread": r.spread,
+                "runs_a_model": bool((chunking.by_name(r.strategy, 1) or _NONE).needs_embeddings),
                 "megabytes_per_second": r.throughput(corpus.total_bytes),
                 "chunks": r.chunks,
                 "tokens_median": r.tokens_median,
@@ -2616,6 +2683,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_chunk.add_argument(
         "--embed-context", type=int, default=2048, metavar="N", help="embedder context"
+    )
+    p_chunk.add_argument(
+        "--runs", type=int, default=3, metavar="N", help="repetitions per strategy"
     )
     p_chunk.add_argument("--device", help="accelerator to pin the embedder to, by name")
     p_chunk.add_argument("--json", action="store_true", help="machine-readable output")
