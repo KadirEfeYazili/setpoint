@@ -107,6 +107,13 @@ class Panel(App):
                 yield DataTable(id="profile-detail", show_header=False, cursor_type="none")
                 yield Label("history", classes="heading")
                 yield DataTable(id="history", cursor_type="none")
+            with TabPane("residency", id="residency"), VerticalScroll(classes="pane"):
+                yield Label("on the card now", classes="heading")
+                yield DataTable(id="residency-card", show_header=False, cursor_type="none")
+                yield Label("holding it", classes="heading")
+                yield DataTable(id="residency-processes", show_header=False, cursor_type="none")
+                yield Label("what the policy would do", classes="heading")
+                yield DataTable(id="residency-models", show_header=False, cursor_type="none")
             with TabPane("chat", id="chat"), Vertical(classes="chat"):
                 yield Label("", id="chat-status", classes="note")
                 yield RichLog(id="transcript", markup=True, wrap=True)
@@ -144,6 +151,7 @@ class Panel(App):
         self._fill_rows("#card", snapshot.card.rows)
         self._fill_budget(snapshot)
         self._fill_profiles(snapshot)
+        self._fill_residency()
         self._fill_chat_status()
 
     def on_resize(self, _: object) -> None:
@@ -180,6 +188,10 @@ class Panel(App):
     def poll_card(self) -> None:
         """Only the card is re-read on the timer. The rest changes when a command runs."""
         self._fill_rows("#card", data.read_card().rows)
+        if self.query("TabbedContent").first(TabbedContent).active == "residency":
+            # Re-read only while it is the pane being looked at: the process list costs
+            # a second NVML round trip and nothing else on screen needs it.
+            self._fill_residency()
 
     # --- filling -------------------------------------------------------------------
 
@@ -290,6 +302,17 @@ class Panel(App):
         view = next((v for v in self.snapshot.profiles if v.signature_id == key), None)
         if view is not None:
             self._show_profile(view)
+
+    def _fill_residency(self) -> None:
+        view = data.read_residency()
+        if view.detail:
+            self._fill_rows("#residency-card", (data.Row("card", "-", view.detail),))
+            self._fill_rows("#residency-processes", ())
+            self._fill_rows("#residency-models", ())
+            return
+        self._fill_rows("#residency-card", view.rows)
+        self._fill_rows("#residency-processes", view.processes)
+        self._fill_rows("#residency-models", view.models)
 
     # --- talking to it -------------------------------------------------------------
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .. import budget, route, sentinel
+from .. import budget, export, route, sentinel
 from .. import profile as profiles
 from ..hardware import HardwareSnapshot, probe
 from ..model import ModelError, ModelInfo, analyze, local_models
@@ -115,6 +115,26 @@ class HistoryEntry:
     when: str
     decode_tok_s: float | None
     note: str = ""
+
+
+# Binaries that hold the card because setpoint or a runner put a model there. Other
+# processes hold it too -- a browser, a compositor -- and they are counted, not named.
+INFERENCE_BINARIES = ("llama-server", "llama-bench", "llama-swap", "llama-perplexity")
+
+
+@dataclass(frozen=True)
+class ResidencyView:
+    """Who holds the card now, and what the policy would do with each measured model.
+
+    The second half is policy rather than observation and the rows say so. The driver
+    on this machine lists the processes holding the card and attributes memory to none
+    of them, so a per-model VRAM figure would be invented.
+    """
+
+    rows: tuple[Row, ...] = field(default_factory=tuple)
+    processes: tuple[Row, ...] = field(default_factory=tuple)
+    models: tuple[Row, ...] = field(default_factory=tuple)
+    detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -381,3 +401,78 @@ def read_chat_target(reference: str, directory: Path | None = None) -> ChatTarge
         config=profile.config,
         gpu=profile.signature.gpu,
     )
+
+
+def read_residency(
+    snapshot: HardwareSnapshot | None = None,
+    directory: Path | None = None,
+    loads_dir: Path | None = None,
+) -> ResidencyView:
+    """What holds the card now, and what the exported policy would do with each model."""
+    snapshot = snapshot or probe(include_wddm=False)
+    if not snapshot.gpus:
+        return ResidencyView(detail="no GPU was found")
+
+    gpu = snapshot.gpus[0]
+    sample = snapshot.sample_for(gpu.index)
+    used = sample.vram_used_mib if sample else None
+    attributed = [p for p in snapshot.processes if p.attributed]
+    rows = [
+        Row("card", gpu.name or "unknown"),
+        Row("in use", _mib(used), "every process together"),
+        Row("free", _mib(sample.vram_free_mib if sample else None), "read now"),
+        Row("processes", str(len(snapshot.processes))),
+    ]
+    if snapshot.processes and not attributed:
+        rows.append(
+            Row(
+                "per process",
+                "not attributed",
+                "the driver lists them and sizes none of them",
+            )
+        )
+
+    processes = tuple(
+        Row(
+            _binary_of(process.name),
+            _mib(process.vram_mib) if process.attributed else "-",
+            "inference" if _is_inference(process.name) else "",
+        )
+        for process in snapshot.processes
+    )
+
+    models: list[Row] = []
+    total_mb = gpu.vram_total_mib
+    for profile in sorted(profiles.load_all(directory), key=lambda p: p.model.label):
+        peak = profile.measurement.peak_vram_mb
+        ttl = export.ttl_for(profile, total_mb)
+        sleep = export.sleep_for(profile, total_mb, ttl)
+        cost = route.read_load(profile.signature.model_digest, loads_dir)
+        share = f"{peak / total_mb:.0%} of the card" if peak and total_mb else ""
+        models.append(Row(f"{profile.model.label} c{profile.target.context}", _mib(peak), share))
+        models.append(
+            Row(
+                "  releases vram",
+                f"after {sleep}s idle",
+                f"then unloads after {ttl}s" if ttl else "",
+            )
+        )
+        models.append(
+            Row(
+                "  costs to return",
+                _seconds(cost.median if cost else None),
+                "measured by route" if cost else "run route to measure it",
+            )
+        )
+    return ResidencyView(rows=tuple(rows), processes=processes, models=tuple(models))
+
+
+def _binary_of(name: str | None) -> str:
+    if not name:
+        return "unknown"
+    return name.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _is_inference(name: str | None) -> bool:
+    stem = _binary_of(name).lower()
+    return any(stem.startswith(known) for known in INFERENCE_BINARIES)
