@@ -18,6 +18,7 @@ from typing import Any
 
 from . import (
     __version__,
+    banner,
     budget,
     doctor,
     export,
@@ -44,7 +45,16 @@ from .backend import (
 )
 from .hardware import probe as probe_hardware
 from .model import ModelError, analyze, local_models, resolve
-from .render import Style, color_enabled, gib, human_bytes, short_path, term_width, wrap
+from .render import (
+    Style,
+    color_enabled,
+    enable_unicode_output,
+    gib,
+    human_bytes,
+    short_path,
+    term_width,
+    wrap,
+)
 
 EXIT_OK = 0
 EXIT_PROBLEM = 1
@@ -1231,7 +1241,7 @@ def _quant_shape(target: object) -> str:
 
 
 def _quant_label(reference: str) -> str:
-    """Ollama references carry a registry prefix that says nothing here."""
+    """A manifest store prefixes names with a registry, which says nothing here."""
     return reference.rsplit("/", 1)[-1]
 
 
@@ -1960,7 +1970,9 @@ def build_parser() -> argparse.ArgumentParser:
             "it has to stay on the CPU."
         ),
     )
-    p_budget.add_argument("model", help="path to a .gguf file, or an Ollama model name")
+    p_budget.add_argument(
+        "model", help="path to a .gguf file, or the name of a model on this machine"
+    )
     p_budget.add_argument(
         "-c", "--context", type=int, default=4096, help="target context length in tokens"
     )
@@ -2013,7 +2025,9 @@ def build_parser() -> argparse.ArgumentParser:
             "measured so far. A result whose spread is too wide is not written."
         ),
     )
-    p_tune.add_argument("model", help="path to a .gguf file, or an Ollama model name")
+    p_tune.add_argument(
+        "model", help="path to a .gguf file, or the name of a model on this machine"
+    )
     p_tune.add_argument(
         "-c", "--context", type=int, default=4096, help="target context length in tokens"
     )
@@ -2076,7 +2090,7 @@ def build_parser() -> argparse.ArgumentParser:
             "llama-server with it. Anything after -- is passed straight through."
         ),
     )
-    p_run.add_argument("model", help="path to a .gguf file, or an Ollama model name")
+    p_run.add_argument("model", help="path to a .gguf file, or the name of a model on this machine")
     p_run.add_argument(
         "-c", "--context", type=int, help="pick the profile measured for this context"
     )
@@ -2094,7 +2108,9 @@ def build_parser() -> argparse.ArgumentParser:
             "profile claims. Exits 1 when the machine no longer matches."
         ),
     )
-    p_bench.add_argument("model", help="path to a .gguf file, or an Ollama model name")
+    p_bench.add_argument(
+        "model", help="path to a .gguf file, or the name of a model on this machine"
+    )
     p_bench.add_argument(
         "-c", "--context", type=int, help="pick the profile measured for this context"
     )
@@ -2146,7 +2162,9 @@ def build_parser() -> argparse.ArgumentParser:
             "measured rather than guessed."
         ),
     )
-    p_quant.add_argument("model", help="path to a .gguf file, or an Ollama model name")
+    p_quant.add_argument(
+        "model", help="path to a .gguf file, or the name of a model on this machine"
+    )
     p_quant.add_argument(
         "-c", "--context", type=int, default=512, metavar="N", help="context for both passes"
     )
@@ -2212,7 +2230,9 @@ def build_parser() -> argparse.ArgumentParser:
             "measured on more than one workload and the answer may differ between them."
         ),
     )
-    p_spec.add_argument("model", help="path to a .gguf file, or an Ollama model name")
+    p_spec.add_argument(
+        "model", help="path to a .gguf file, or the name of a model on this machine"
+    )
     p_spec.add_argument(
         "-c", "--context", type=int, help="pick the profile measured for this context"
     )
@@ -2341,9 +2361,33 @@ def split_forwarded(argv: list[str]) -> tuple[list[str], tuple[str, ...]]:
     return argv[:cut], tuple(argv[cut + 1 :])
 
 
+def cmd_welcome() -> int:
+    """What `setpoint` alone prints: the mark, and where to start."""
+    enable_unicode_output()
+    style = Style(color_enabled())
+    # No tagline here: the mark and the rules already take eight rows, and what a
+    # person needs next is the list below, not a slogan.
+    for line in banner.render(style, tagline=False):
+        print(line)
+    print()
+    print(style.bold("start here"))
+    for name, what in (
+        ("setpoint doctor", "find what is costing throughput before measuring"),
+        ("setpoint budget MODEL", "where the split has to fall, running nothing"),
+        ("setpoint tune MODEL", "measure it and keep the answer"),
+        ("setpoint panel", "one screen for everything measured"),
+    ):
+        print(f"  {name:<24}{style.dim(what)}")
+    print()
+    print(style.dim("  setpoint --help for the rest"))
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     own, forwarded = split_forwarded(list(argv if argv is not None else sys.argv[1:]))
+    if not own:
+        return cmd_welcome()
     args = parser.parse_args(own)
     if forwarded:
         if getattr(args, "func", None) is not cmd_run:

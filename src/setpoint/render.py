@@ -18,6 +18,11 @@ GREEN = "\033[32m"
 BLUE = "\033[34m"
 GREY = "\033[90m"
 
+# One accent and one shade of it. The face reads as the brand colour, the bevel a step
+# behind it, which is what gives the wordmark depth without introducing a second hue.
+ACCENT = "\033[96m"
+ACCENT_DIM = "\033[36m"
+
 
 def color_enabled(stream: object | None = None) -> bool:
     if os.environ.get("NO_COLOR") is not None:
@@ -55,6 +60,12 @@ class Style:
 
     def grey(self, text: str) -> str:
         return self._wrap(GREY, text)
+
+    def accent(self, text: str) -> str:
+        return self._wrap(ACCENT, text)
+
+    def accent_dim(self, text: str) -> str:
+        return self._wrap(ACCENT_DIM, text)
 
 
 def wrap(text: str, width: int, indent: str = "") -> list[str]:
@@ -99,8 +110,56 @@ def short_path(path: object, home: str | None = None) -> str:
     return f"{head}/{name}" if head else name
 
 
-def term_width(default: int = 88) -> int:
+# Terminals that render UTF-8 whatever the console code page says. Windows still
+# reports the ANSI code page to Python, so without this the box drawing is unprintable
+# on a machine whose terminal displays it perfectly well.
+_UTF8_TERMINALS = ("WT_SESSION", "TERM_PROGRAM", "VSCODE_INJECTION")
+
+
+def enable_unicode_output(stream: object | None = None) -> bool:
+    """Switch stdout to UTF-8 where the terminal is known to render it.
+
+    Left alone everywhere else: writing UTF-8 to a console that reads it as a legacy
+    code page produces mojibake, which is worse than the ASCII fallback.
+    """
+    target = stream if stream is not None else sys.stdout
+    if (getattr(target, "encoding", "") or "").lower().replace("-", "") == "utf8":
+        return True
+    if not any(os.environ.get(name) for name in _UTF8_TERMINALS):
+        return False
+    reconfigure = getattr(target, "reconfigure", None)
+    if reconfigure is None:
+        return False
     try:
-        return min(os.get_terminal_size().columns, 100)
+        reconfigure(encoding="utf-8")
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def encodable(text: str, stream: object | None = None) -> bool:
+    """Whether the output encoding can represent `text`.
+
+    A Windows console on a non-Latin-1 code page cannot print box drawing, and Python
+    raises rather than substituting. Anything decorative has to ask first.
+    """
+    target = stream if stream is not None else sys.stdout
+    encoding = getattr(target, "encoding", None) or "utf-8"
+    try:
+        text.encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return False
+    return True
+
+
+def term_width(default: int = 88) -> int:
+    """Width to lay text out in. Capped, because prose stops being readable past it."""
+    return min(terminal_columns(default), 100)
+
+
+def terminal_columns(default: int = 88) -> int:
+    """The real width. Anything that must not wrap has to ask for this one."""
+    try:
+        return os.get_terminal_size().columns
     except OSError:
         return default

@@ -452,11 +452,15 @@ def check_backend(snap: HardwareSnapshot) -> list[Finding]:
     """Is there a llama.cpp we can actually measure with, and on what?"""
     binaries = {name: shutil.which(name) for name in ("llama-bench", "llama-server", "llama-cli")}
     found = {k: v for k, v in binaries.items() if v}
-    ollama = shutil.which("ollama")
+    other = shutil.which("ollama")
 
     # find_binary also honours the override, so a binary outside PATH still counts.
     bench = find_binary()
-    evidence: dict[str, object] = {"llama_cpp": found, "ollama": ollama, "llama_bench": str(bench)}
+    evidence: dict[str, object] = {
+        "llama_cpp": found,
+        "other_runner": bool(other),
+        "llama_bench": str(bench),
+    }
 
     if bench is not None:
         devices = backend_devices()
@@ -466,8 +470,11 @@ def check_backend(snap: HardwareSnapshot) -> list[Finding]:
         return findings
 
     what = "llama-bench was not found on PATH."
-    if ollama:
-        what += " Ollama is installed, but it does not expose llama-bench."
+    if other:
+        what += (
+            " Another runner is installed, but a runner that wraps the engine does "
+            "not expose the benchmark binary setpoint measures with."
+        )
 
     return [
         Finding(
