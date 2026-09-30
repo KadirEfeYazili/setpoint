@@ -1363,6 +1363,10 @@ def cmd_chunk(args: argparse.Namespace) -> int:
         print(f"  {style.dim('running on ' + chosen.id + ' -- ' + chosen.name)}")
     print(style.dim("  started only for the strategies that need it"))
 
+    snapshot = probe_hardware(include_wddm=False)
+    if not _affordable(corpus, embedder, snapshot, args, style):
+        return EXIT_PROBLEM
+
     def open_session() -> serve.Session:
         return serve.Session(
             binary=server,
@@ -1398,6 +1402,52 @@ class _EmbedConfig:
     spec_type = None
     n_cpu_moe = None
     threads = None
+
+
+def _affordable(corpus, embedder, snapshot, args, style) -> bool:
+    """Say what the measurement will demand, and stop if it looks like too much.
+
+    A measurement plan is itself something to budget. This project has twice had a run
+    take the machine down, once in phase 1 and once measuring this very command, so the
+    forecast is printed before anything starts rather than explained afterwards.
+    """
+    wanted = args.strategy or None
+    embedding = [
+        s for s in chunking.strategies(1) if s.needs_embeddings and (not wanted or s.name in wanted)
+    ]
+    if not embedding:
+        return True
+
+    allowance = budget.runtime_allowance(embedder, budget.DEFAULT_UBATCH)
+    card = embedder.weights.total_bytes + allowance.total_bytes
+    plan = chunking.forecast(
+        corpus,
+        dimension=embedder.embedding_length or 768,
+        card_bytes=card,
+        runs=args.runs,
+    )
+    free = snapshot.host.available_ram_bytes
+
+    print(style.bold("\nwhat measuring will cost"))
+    _row(style, "pieces to embed", f"~{plan.sentences}", "estimated from sentence endings")
+    _row(style, "vectors in ram", "~" + gib(plan.vector_bytes), f"{plan.dimension} floats each")
+    _row(style, "embedder on card", gib(plan.card_bytes), "while an embedding strategy runs")
+    if free:
+        _row(style, "ram free now", gib(free))
+    if not chunking.crowded(plan, free):
+        return True
+
+    print(
+        style.yellow(
+            f"  this asks for {gib(plan.vector_bytes)} of the {gib(free or 0)} free. "
+            "Measuring has taken this machine down before."
+        )
+    )
+    if args.force:
+        print(style.dim("  --force given, running anyway"))
+        return True
+    print(style.dim("  use --limit to measure a slice of the corpus, or --force to go ahead"))
+    return False
 
 
 def _run_strategies(open_session, corpus, args, style) -> tuple[list[chunking.Result], float]:
@@ -2688,6 +2738,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_chunk.add_argument(
         "--runs", type=int, default=3, metavar="N", help="repetitions per strategy"
+    )
+    p_chunk.add_argument(
+        "--force",
+        action="store_true",
+        help="run even when the forecast says the measurement may not fit in RAM",
     )
     p_chunk.add_argument("--device", help="accelerator to pin the embedder to, by name")
     p_chunk.add_argument("--json", action="store_true", help="machine-readable output")

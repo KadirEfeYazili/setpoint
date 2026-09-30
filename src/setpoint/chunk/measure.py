@@ -12,6 +12,7 @@ care: see `calibrate`.
 from __future__ import annotations
 
 import random
+import re
 import statistics
 import time
 from collections.abc import Callable, Iterable
@@ -227,3 +228,63 @@ def pick(runs: list[Result]) -> Result:
         sampled=middle.sampled,
         spread=spread,
     )
+
+
+# Sentence boundaries for the forecast only. Getting this slightly wrong changes an
+# estimate, not a measurement, and the chunkers do their own splitting.
+_SENTENCE = re.compile(r"[.!?]['\"\)\]]?\s+|\n{2,}")
+
+
+@dataclass(frozen=True)
+class Forecast:
+    """What running a strategy will demand, before it is run.
+
+    The project has twice had a measurement take the machine down, so a measurement
+    plan is itself something to budget. This is an estimate and says so.
+    """
+
+    sentences: int
+    dimension: int
+    vector_bytes: int
+    card_bytes: int = 0
+    runs_a_model: bool = False
+
+    @property
+    def total_host_bytes(self) -> int:
+        return self.vector_bytes
+
+
+def count_sentences(corpus: Corpus) -> int:
+    """How many pieces an embedding strategy would have to embed."""
+    return sum(len(_SENTENCE.split(document.text)) for document in corpus.documents)
+
+
+def forecast(
+    corpus: Corpus,
+    dimension: int,
+    card_bytes: int = 0,
+    runs_a_model: bool = True,
+    runs: int = 1,
+) -> Forecast:
+    """Size an embedding pass over this corpus, in host RAM and on the card."""
+    sentences = count_sentences(corpus) if runs_a_model else 0
+    # float32 per component is what the server returns and what the library keeps.
+    vectors = sentences * dimension * 4 * max(1, runs)
+    return Forecast(
+        sentences=sentences,
+        dimension=dimension,
+        vector_bytes=vectors,
+        card_bytes=card_bytes if runs_a_model else 0,
+        runs_a_model=runs_a_model,
+    )
+
+
+def crowded(forecast: Forecast, host_ram_bytes: int | None, share: float = 0.5) -> bool:
+    """Whether the plan asks for a large share of the RAM that is free right now.
+
+    Judged against free RAM rather than installed RAM: the machine that went down had
+    plenty installed and little free.
+    """
+    if not host_ram_bytes or not forecast.total_host_bytes:
+        return False
+    return forecast.total_host_bytes > host_ram_bytes * share
