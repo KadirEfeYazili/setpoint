@@ -126,7 +126,7 @@ setpoint export --target NAME        # runner configuration from the measured pr
 setpoint top                         # live: VRAM, shared memory, throttle
 setpoint status                      # one-shot machine state
 setpoint profile list|show|path|export|import
-setpoint panel                       # one screen for everything measured
+setpoint panel                       # one screen for everything measured, chat included
 ```
 
 Exit codes are part of the contract: `0` healthy, `1` a problem was found, `2` setpoint
@@ -304,6 +304,12 @@ tuning: device ids are positional, and a reboot can renumber them.
 The context is kept by asking the server's own tokenizer how long the conversation is,
 not by estimating from character counts, and the oldest exchanges are dropped in pairs
 when it no longer fits.
+
+The same conversation is a pane in `setpoint panel`, next to the budget, the profiles
+and the search. It runs the client above rather than a second copy of it, so an answer
+costs the same and is reported the same way. The server starts on the first message and
+stops when the model is changed or the panel is closed: opening a screen should not load
+a model onto a card this size.
 
 ## Roadmap
 

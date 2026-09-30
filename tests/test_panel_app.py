@@ -18,7 +18,7 @@ pytest.importorskip("textual", reason="the panel needs the tui extra")
 
 from textual.widgets import DataTable, Input, Label, RichLog, Select  # noqa: E402
 
-from setpoint import chat, serve  # noqa: E402
+from setpoint import serve  # noqa: E402
 from setpoint.panel import data  # noqa: E402
 from setpoint.panel.app import Panel  # noqa: E402
 
@@ -236,9 +236,31 @@ def talking(monkeypatch, session):
     monkeypatch.setattr(Panel, "_start_session", lambda self, target: session)
 
 
+async def ask(app, pilot, text: str) -> None:
+    """Type into the chat box the way a person does, and wait for the answer.
+
+    The pane has to be the visible one: a widget that was never shown has no size and
+    a log written to it renders nothing, which is a property of the harness rather
+    than of the panel.
+    """
+    app.query_one("TabbedContent").active = "chat"
+    await pilot.pause()
+    box = app.query_one("#say", Input)
+    box.focus()
+    box.value = text
+    await pilot.pause()
+    await pilot.press("enter")
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+
+
 def lines(app) -> str:
     log = app.query_one("#transcript", RichLog)
     return "\n".join(str(line) for line in log.lines)
+
+
+def status(app) -> str:
+    return str(app.query_one("#chat-status", Label).content)
 
 
 class TestChat:
@@ -247,9 +269,8 @@ class TestChat:
             app = Panel(reference="gemma3:1b", interval=60.0)
             async with app.run_test(size=(120, 44)) as pilot:
                 await pilot.pause()
-                status = str(app.query_one("#chat-status", Label).renderable)
-                assert "86.71" in status
-                assert "starts on the first message" in status
+                assert "86.71" in status(app)
+                assert "starts on the first message" in status(app)
 
         drive(go())
 
@@ -264,7 +285,7 @@ class TestChat:
             app = Panel(reference="x:1b", interval=60.0)
             async with app.run_test(size=(120, 44)) as pilot:
                 await pilot.pause()
-                assert "press t" in str(app.query_one("#chat-status", Label).renderable)
+                assert "press t" in status(app)
 
         drive(go())
 
@@ -275,11 +296,7 @@ class TestChat:
             app = Panel(reference="gemma3:1b", interval=60.0)
             async with app.run_test(size=(120, 44)) as pilot:
                 await pilot.pause()
-                app.query_one("TabbedContent").active = "chat"
-                app.query_one("#say", Input).value = "hello"
-                await pilot.press("enter")
-                await app.workers.wait_for_complete()
-                await pilot.pause()
+                await ask(app, pilot, "hello")
                 text = lines(app)
                 assert "an answer" in text
                 assert "81.9 t/s" in text
@@ -295,10 +312,7 @@ class TestChat:
             app = Panel(reference="gemma3:1b", interval=60.0)
             async with app.run_test(size=(120, 44)) as pilot:
                 await pilot.pause()
-                app.query_one("#say", Input).value = "why measure"
-                await pilot.press("enter")
-                await app.workers.wait_for_complete()
-                await pilot.pause()
+                await ask(app, pilot, "why measure")
                 assert session.sent[0][-1] == {"role": "user", "content": "why measure"}
                 assert app.query_one("#say", Input).value == ""
 
@@ -311,10 +325,7 @@ class TestChat:
             app = Panel(reference="gemma3:1b", interval=60.0)
             async with app.run_test(size=(120, 44)) as pilot:
                 await pilot.pause()
-                app.query_one("#say", Input).value = "hello"
-                await pilot.press("enter")
-                await app.workers.wait_for_complete()
-                await pilot.pause()
+                await ask(app, pilot, "hello")
                 text = lines(app)
                 assert "0.0 t/s" not in text
                 assert "rate not reported" in text
@@ -330,10 +341,7 @@ class TestChat:
             async with app.run_test(size=(120, 44)) as pilot:
                 await pilot.pause()
                 app._session = session
-                app.query_one("#say", Input).value = "hello"
-                await pilot.press("enter")
-                await app.workers.wait_for_complete()
-                await pilot.pause()
+                await ask(app, pilot, "hello")
                 assert "stopped answering" in lines(app)
                 assert app._session is None
                 assert session.closed
@@ -348,10 +356,7 @@ class TestChat:
             app = Panel(reference="gemma3:1b", interval=60.0)
             async with app.run_test(size=(120, 44)) as pilot:
                 await pilot.pause()
-                app.query_one("#say", Input).value = "   "
-                await pilot.press("enter")
-                await app.workers.wait_for_complete()
-                await pilot.pause()
+                await ask(app, pilot, "   ")
                 assert session.sent == []
 
         drive(go())
@@ -390,10 +395,7 @@ class TestChat:
             app = Panel(reference="gemma3:1b", interval=60.0)
             async with app.run_test(size=(120, 44)) as pilot:
                 await pilot.pause()
-                app.query_one("#say", Input).value = "hello"
-                await pilot.press("enter")
-                await app.workers.wait_for_complete()
-                await pilot.pause()
+                await ask(app, pilot, "hello")
                 app.action_clear_chat()
                 await pilot.pause()
                 assert app.conversation.turns == []
