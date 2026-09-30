@@ -29,6 +29,11 @@ dependencies = [
 tui = [
     "textual>=8.0",
 ]
+# Chunking strategies come from an existing library rather than from us: the decision
+# setpoint contributes is which of them to use on this hardware, not how to split text.
+chunk = [
+    "chonkie>=1.7",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
