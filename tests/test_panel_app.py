@@ -16,8 +16,9 @@ import pytest
 
 pytest.importorskip("textual", reason="the panel needs the tui extra")
 
-from textual.widgets import DataTable, Select  # noqa: E402
+from textual.widgets import DataTable, Input, Label, RichLog, Select  # noqa: E402
 
+from setpoint import chat, serve  # noqa: E402
 from setpoint.panel import data  # noqa: E402
 from setpoint.panel.app import Panel  # noqa: E402
 
@@ -44,6 +45,17 @@ PROFILE = data.ProfileView(
     checks=3,
     created="2026-09-09T12:23:24Z",
 )
+TARGET = data.ChatTarget(
+    reference="gemma3:1b",
+    label="gemma3 Q4_K_M",
+    signature_id="a748e45f1a843e88",
+    context=4096,
+    claimed_tok_s=86.71,
+    speculator="ngram-simple",
+    model_path="gemma3.gguf",
+    config=object(),
+    gpu="Test GPU",
+)
 SNAPSHOT = data.Snapshot(
     card=CARD,
     models=("gemma3:1b", "qwen2.5:3b"),
@@ -58,6 +70,7 @@ def _no_machine(monkeypatch):
     monkeypatch.setattr(data, "gather", lambda *a, **k: SNAPSHOT)
     monkeypatch.setattr(data, "read_card", lambda *a, **k: CARD)
     monkeypatch.setattr(data, "read_history", lambda *a, **k: ())
+    monkeypatch.setattr(data, "read_chat_target", lambda *a, **k: TARGET)
 
 
 def drive(coro):
@@ -193,5 +206,197 @@ class TestEmptyMachine:
                 table = app.query_one("#terms", DataTable)
                 assert table.row_count == 1
                 assert "not a GGUF file" in str(table.get_row_at(0))
+
+        drive(go())
+
+
+class FakeSession:
+    """A server that never starts. What is under test is the pane, not llama.cpp."""
+
+    def __init__(self, reply="an answer", timing=True, fails=False):
+        self.reply = reply
+        self.base = "http://127.0.0.1:1"
+        self.last = serve.Reply(text=reply, decode_tok_s=81.9, tokens=61) if timing else None
+        self.fails = fails
+        self.sent: list[list[dict]] = []
+        self.closed = False
+
+    def stream(self, messages, **_):
+        self.sent.append(messages)
+        if self.fails:
+            raise OSError("connection reset")
+        yield self.reply
+
+    def __exit__(self, *_):
+        self.closed = True
+
+
+def talking(monkeypatch, session):
+    """Wire the app to a fake server, so nothing loads a model."""
+    monkeypatch.setattr(Panel, "_start_session", lambda self, target: session)
+
+
+def lines(app) -> str:
+    log = app.query_one("#transcript", RichLog)
+    return "\n".join(str(line) for line in log.lines)
+
+
+class TestChat:
+    def test_the_pane_says_what_it_would_run_on_before_anything_starts(self):
+        async def go():
+            app = Panel(reference="gemma3:1b", interval=60.0)
+            async with app.run_test(size=(120, 44)) as pilot:
+                await pilot.pause()
+                status = str(app.query_one("#chat-status", Label).renderable)
+                assert "86.71" in status
+                assert "starts on the first message" in status
+
+        drive(go())
+
+    def test_a_model_with_no_profile_offers_the_measurement_instead(self, monkeypatch):
+        monkeypatch.setattr(
+            data,
+            "read_chat_target",
+            lambda *a, **k: data.ChatTarget(reference="x:1b", detail="nothing measured"),
+        )
+
+        async def go():
+            app = Panel(reference="x:1b", interval=60.0)
+            async with app.run_test(size=(120, 44)) as pilot:
+                await pilot.pause()
+                assert "press t" in str(app.query_one("#chat-status", Label).renderable)
+
+        drive(go())
+
+    def test_an_answer_lands_with_what_it_cost(self, monkeypatch):
+        talking(monkeypatch, FakeSession())
+
+        async def go():
+            app = Panel(reference="gemma3:1b", interval=60.0)
+            async with app.run_test(size=(120, 44)) as pilot:
+                await pilot.pause()
+                app.query_one("TabbedContent").active = "chat"
+                app.query_one("#say", Input).value = "hello"
+                await pilot.press("enter")
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                text = lines(app)
+                assert "an answer" in text
+                assert "81.9 t/s" in text
+                assert "-6% on the profile" in text
+
+        drive(go())
+
+    def test_the_question_reaches_the_server_and_the_box_is_emptied(self, monkeypatch):
+        session = FakeSession()
+        talking(monkeypatch, session)
+
+        async def go():
+            app = Panel(reference="gemma3:1b", interval=60.0)
+            async with app.run_test(size=(120, 44)) as pilot:
+                await pilot.pause()
+                app.query_one("#say", Input).value = "why measure"
+                await pilot.press("enter")
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                assert session.sent[0][-1] == {"role": "user", "content": "why measure"}
+                assert app.query_one("#say", Input).value == ""
+
+        drive(go())
+
+    def test_an_answer_the_server_never_timed_is_not_reported_as_zero(self, monkeypatch):
+        talking(monkeypatch, FakeSession(timing=False))
+
+        async def go():
+            app = Panel(reference="gemma3:1b", interval=60.0)
+            async with app.run_test(size=(120, 44)) as pilot:
+                await pilot.pause()
+                app.query_one("#say", Input).value = "hello"
+                await pilot.press("enter")
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                text = lines(app)
+                assert "0.0 t/s" not in text
+                assert "rate not reported" in text
+
+        drive(go())
+
+    def test_a_server_that_stops_answering_is_said_so_and_dropped(self, monkeypatch):
+        session = FakeSession(fails=True)
+        talking(monkeypatch, session)
+
+        async def go():
+            app = Panel(reference="gemma3:1b", interval=60.0)
+            async with app.run_test(size=(120, 44)) as pilot:
+                await pilot.pause()
+                app._session = session
+                app.query_one("#say", Input).value = "hello"
+                await pilot.press("enter")
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                assert "stopped answering" in lines(app)
+                assert app._session is None
+                assert session.closed
+
+        drive(go())
+
+    def test_an_empty_question_is_not_sent(self, monkeypatch):
+        session = FakeSession()
+        talking(monkeypatch, session)
+
+        async def go():
+            app = Panel(reference="gemma3:1b", interval=60.0)
+            async with app.run_test(size=(120, 44)) as pilot:
+                await pilot.pause()
+                app.query_one("#say", Input).value = "   "
+                await pilot.press("enter")
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                assert session.sent == []
+
+        drive(go())
+
+    def test_switching_model_stops_the_server_running_the_old_one(self):
+        session = FakeSession()
+
+        async def go():
+            app = Panel(reference="gemma3:1b", interval=60.0)
+            async with app.run_test(size=(120, 44)) as pilot:
+                await pilot.pause()
+                app._session = session
+                app.query_one("#model", Select).value = "qwen2.5:3b"
+                await pilot.pause()
+                assert session.closed
+                assert app._session is None
+
+        drive(go())
+
+    def test_leaving_the_panel_stops_the_server(self):
+        session = FakeSession()
+
+        async def go():
+            app = Panel(reference="gemma3:1b", interval=60.0)
+            async with app.run_test(size=(120, 44)) as pilot:
+                await pilot.pause()
+                app._session = session
+            assert session.closed
+
+        drive(go())
+
+    def test_clearing_empties_the_transcript_and_the_history(self, monkeypatch):
+        talking(monkeypatch, FakeSession())
+
+        async def go():
+            app = Panel(reference="gemma3:1b", interval=60.0)
+            async with app.run_test(size=(120, 44)) as pilot:
+                await pilot.pause()
+                app.query_one("#say", Input).value = "hello"
+                await pilot.press("enter")
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                app.action_clear_chat()
+                await pilot.pause()
+                assert app.conversation.turns == []
+                assert lines(app).strip() == ""
 
         drive(go())
