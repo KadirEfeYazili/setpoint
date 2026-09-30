@@ -14,17 +14,12 @@ that never fires looks exactly like one that fires and gets rejected.
 
 from __future__ import annotations
 
-import json
-import socket
-import subprocess
-import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .backend import BackendError, find_server_binary, server_argv
+from .backend import BackendError, find_server_binary
 from .measure import MAX_RELIABLE_SPREAD, MIN_RELIABLE_RUNS, Statistic
+from .serve import Session
 
 # Speculators that need no draft model, so none of them costs VRAM. On a card that is
 # already full, this is the only kind that can be turned on at all.
@@ -173,117 +168,6 @@ class Report:
         return picks.pop() if len(picks) == 1 else None
 
 
-class Session:
-    """A llama-server started for one configuration and stopped afterwards."""
-
-    def __init__(
-        self,
-        binary: str | Path,
-        model_path: str | Path,
-        config: object,
-        context: int,
-        devices: tuple[str, ...] = (),
-        speculator: str | None = None,
-        port: int | None = None,
-    ) -> None:
-        self.port = port or _free_port()
-        extra: tuple[str, ...] = ("--port", str(self.port), "--metrics")
-        if speculator:
-            extra += ("--spec-type", speculator)
-        self.argv = server_argv(binary, model_path, config, context, devices, extra)
-        self._process: subprocess.Popen | None = None
-
-    @property
-    def base(self) -> str:
-        return f"http://127.0.0.1:{self.port}"
-
-    def __enter__(self) -> Session:
-        self._process = subprocess.Popen(
-            self.argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        if not self._wait_ready():
-            self.__exit__(None, None, None)
-            raise BackendError("llama-server did not become ready")
-        return self
-
-    def __exit__(self, *_: object) -> None:
-        process, self._process = self._process, None
-        if process is None:
-            return
-        process.terminate()
-        try:
-            process.wait(timeout=STOP_TIMEOUT_S)
-        except subprocess.TimeoutExpired:
-            process.kill()
-
-    def _wait_ready(self, timeout_s: float = READY_TIMEOUT_S) -> bool:
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            if self._process is None or self._process.poll() is not None:
-                return False
-            try:
-                with urllib.request.urlopen(f"{self.base}/health", timeout=2) as response:
-                    if response.status == 200:
-                        return True
-            except (urllib.error.URLError, TimeoutError, OSError):
-                pass
-            time.sleep(1.0)
-        return False
-
-    def decode_rate(self, prompt: str, max_tokens: int = DEFAULT_MAX_TOKENS) -> float | None:
-        """Decode throughput for one request, as the server itself timed it."""
-        payload = {
-            "model": "setpoint",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-            "temperature": 0,
-            "seed": 7,
-        }
-        request = urllib.request.Request(
-            f"{self.base}/v1/chat/completions",
-            data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_S) as response:
-                body = json.loads(response.read())
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-            return None
-        return (body.get("timings") or {}).get("predicted_per_second")
-
-    def counters(self) -> dict[str, int]:
-        """The server's speculation counters, which say whether the drafter fired."""
-        try:
-            with urllib.request.urlopen(f"{self.base}/metrics", timeout=10) as response:
-                return parse_counters(response.read().decode())
-        except (urllib.error.URLError, TimeoutError, OSError):
-            return {}
-
-
-def parse_counters(text: str) -> dict[str, int]:
-    """Speculation counters out of the server's Prometheus text.
-
-    The per-position breakdown carries labels and is skipped: the totals are what a
-    decision needs, and the labelled lines would collide on name.
-    """
-    out: dict[str, int] = {}
-    for line in text.splitlines():
-        if not line.startswith("llamacpp:spec_decode_num") or "{" in line:
-            continue
-        name, _, value = line.partition(" ")
-        try:
-            out[name.split(":", 1)[1]] = int(float(value))
-        except ValueError:
-            continue
-    return out
-
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
 def measure_trial(
     binary: str | Path,
     model_path: str | Path,
@@ -298,10 +182,23 @@ def measure_trial(
     """Start a server, discard one warm-up request, measure `runs` more, stop."""
     try:
         with Session(binary, model_path, config, context, devices, speculator) as session:
-            session.decode_rate(workload.prompt, max_tokens)
+            session.complete(
+                [{"role": "user", "content": workload.prompt}],
+                max_tokens=max_tokens,
+                temperature=0,
+                seed=7,
+            )
             samples = [
                 rate
-                for rate in (session.decode_rate(workload.prompt, max_tokens) for _ in range(runs))
+                for rate in (
+                    session.complete(
+                        [{"role": "user", "content": workload.prompt}],
+                        max_tokens=max_tokens,
+                        temperature=0,
+                        seed=7,
+                    ).decode_tok_s
+                    for _ in range(runs)
+                )
                 if rate
             ]
             stats = session.counters() if speculator else {}
