@@ -2,10 +2,10 @@
 ────────────────────────────────────────────────────────────────
 ███████╗███████╗████████╗██████╗  ██████╗ ██╗███╗   ██╗████████╗
 ██╔════╝██╔════╝╚══██╔══╝██╔══██╗██╔═══██╗██║████╗  ██║╚══██╔══╝
-███████╗█████╗     ██║   ██████╔╝██║   ██║██║██╔██╗ ██║   ██║
-╚════██║██╔══╝     ██║   ██╔═══╝ ██║   ██║██║██║╚██╗██║   ██║
-███████║███████╗   ██║   ██║     ╚██████╔╝██║██║ ╚████║   ██║
-╚══════╝╚══════╝   ╚═╝   ╚═╝      ╚═════╝ ╚═╝╚═╝  ╚═══╝   ╚═╝
+███████╗█████╗     ██║   ██████╔╝██║   ██║██║██╔██╗ ██║   ██║   
+╚════██║██╔══╝     ██║   ██╔═══╝ ██║   ██║██║██║╚██╗██║   ██║   
+███████║███████╗   ██║   ██║     ╚██████╔╝██║██║ ╚████║   ██║   
+╚══════╝╚══════╝   ╚═╝   ╚═╝      ╚═════╝ ╚═╝╚═╝  ╚═══╝   ╚═╝   
 ────────────────────────────────────────────────────────────────
 measurement-driven configuration for local inference
 ```
@@ -107,7 +107,9 @@ export SETPOINT_LLAMA_SERVER=/path/to/llama-server
 
 ## Commands
 
-`MODEL` is a path to a `.gguf` file or the name of a model already on this machine.
+`MODEL` is a path to a `.gguf` file, or the name of one already on this machine.
+Names are matched against the directories models are kept in; add your own with
+`SETPOINT_MODELS_DIR`.
 
 ```bash
 setpoint doctor                      # scan for traps that silently cost throughput
@@ -285,8 +287,10 @@ Each phase leaves something usable on its own.
 | 6 | Reasoning layer: MCP server, statusline, agent resource API | Planned |
 | 7 | Contextual sparsity, learned eviction policies, upstream contribution | Research |
 
-llama.cpp is the only engine driven so far. Models stored by Ollama are found and
-read in place; other engines sit behind the same provider interface and are not done.
+llama.cpp is the only engine driven so far. Model files are found by searching the
+directories they are kept in, so a name works wherever the file already lives; point
+`SETPOINT_MODELS_DIR` at your own directory to add one. Other engines sit behind the
+same provider interface and are not done.
 
 ## Architecture
 
@@ -313,8 +317,9 @@ No provider is privileged.
 
 ## Scope
 
-setpoint does not replace llama.cpp, Ollama or vLLM. It sits above them and decides
-what to tell them. It writes no CUDA kernels and modifies no model files.
+setpoint does not replace an inference engine. It sits above one and decides what to
+tell it. It writes no CUDA kernels, modifies no model files, and serves no requests of
+its own: it reads the files that are already on the disk and drives the engine directly.
 
 ## Hardware support
 
