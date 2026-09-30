@@ -13,7 +13,7 @@ measurement-driven configuration for local inference
 `setpoint` finds the configuration your hardware can actually hold, by measuring it
 instead of guessing, and remembers the answer.
 
-> **Status: early development.** All fifteen commands run, and have been used to
+> **Status: early development.** All sixteen commands run, and have been used to
 > measure real hardware. Nothing is published to a package index yet.
 > See [Roadmap](#roadmap).
 
@@ -122,6 +122,7 @@ setpoint chat MODEL                  # talk to it, with each answer's cost besid
 setpoint route --tokens N            # which measured model answers, switch cost included
 setpoint spec MODEL                  # whether speculative decoding pays here, per workload
 setpoint quant MODEL -f CORPUS       # compare local quantizations: speed, VRAM, drift
+setpoint residency                   # who holds the card, and what the policy would do
 setpoint export --target NAME        # runner configuration from the measured profiles
 setpoint top                         # live: VRAM, shared memory, throttle
 setpoint status                      # one-shot machine state
@@ -134,8 +135,8 @@ could not complete the check. Data goes to stdout and diagnostics to stderr, so 
 command composes with `jq` and shell pipelines.
 
 `--json` is accepted by `doctor`, `hardware`, `budget`, `tune`, `bench`, `route`,
-`spec`, `quant`, `status` and `profile`. `export` writes its own format, `top`, `panel`
-and `chat` are screens, and `run` hands over to the server.
+`spec`, `quant`, `residency`, `status` and `profile`. `export` writes its own format,
+`top`, `panel` and `chat` are screens, and `run` hands over to the server.
 
 A first session, in order:
 
@@ -292,6 +293,57 @@ the profile still holds
 It exits 1 when the difference leaves the tolerance, which makes it usable from a
 scheduler.
 
+`export` turns the profiles into a configuration for a runner, and the residency policy
+travels with them. Each entry gets two idle thresholds: after the first the server
+releases the model's weights but keeps its process, and after the second the runner
+takes the process away. Releasing was measured to hand back 98.6% of a model's VRAM and
+to cost less on the next request than a cold start, so a model that holds most of the
+card yields it sooner. The thresholds are policy rather than measurement and the
+generated file says so beside each entry; `--ttl` and `--sleep-idle` override them, and
+`--sleep-idle 0` turns the first one off.
+
+```
+# measured 86.71 tok/s (spread 0.7%) over 5 runs on 2026-09-09T12:23:24Z
+# peak VRAM 1335 MiB
+# releases its VRAM after 600s idle and reloads on the next request;
+# the runner unloads the process after 3600s
+```
+
+## Residency
+
+`residency` says what is on the card right now and, for every measured profile, what
+the policy would do with it.
+
+```
+$ setpoint residency
+
+on the card now
+  card                  NVIDIA GeForce GTX 1650
+  in use                  1577 MiB   every process together
+  free                    2518 MiB   read now
+  processes                     13
+  per process           not attributed   the driver lists them and sizes none of them
+
+holding it   13 process(es)
+  llama-server.exe               -   inference
+  12 more; --all lists them
+
+what the policy would do
+  Qwen2.5 3B Instruct Q4_K_M c4096  3282 MiB   80% of the card
+    releases vram       after 60s idle   then unloads after 300s
+    costs to return          5.19s   measured by route
+  gemma3 Q4_K_M c4096     1335 MiB   33% of the card
+    releases vram       after 600s idle   then unloads after 3600s
+    costs to return      2.62s   measured by route
+```
+
+The `not attributed` line is the important one. Some drivers name every process holding
+the card and size none of them, and on such a machine any per-model VRAM figure would
+have to be invented by dividing the total up. setpoint says it could not look rather
+than printing a number it did not get; where a driver does attribute memory, the line
+does not appear and the figures do. The same three sections are the panel's residency
+pane, and `--json` carries all of them.
+
 ## Talking to it
 
 `chat` starts the engine with the measured configuration and talks to it. There is no
@@ -339,8 +391,8 @@ Each phase leaves something usable on its own.
 | 1 | Budgeter, autotuner, doctor, profile format | Done |
 | 2 | Runner configuration from measured profiles, live telemetry, profile sharing, regression sentinel | Done |
 | 3 | Request routing, speculative decoding orchestration, quantization advisor, panel | Done |
-| 4 | Fast model switching, MoE expert cache policy, KV cache tiering | In progress |
-| 5 | Knowledge layer: measured chunking, retrieval policy, embedding placement, search | Planned |
+| 4 | Residency: releasing VRAM on idle, KV cache tiering, host RAM budgeting | Done |
+| 5 | Knowledge layer: measured chunking, retrieval policy, embedding placement, search | In progress |
 | 6 | Reasoning layer: MCP server, statusline, agent resource API | Planned |
 | 7 | Contextual sparsity, learned eviction policies, upstream contribution | Research |
 

@@ -258,21 +258,42 @@ def parse_counters(text: str) -> dict[str, int]:
     return out
 
 
-def pin_device(prefer: str | None) -> tuple[tuple[str, ...], BackendDevice | None]:
+def pin_device(
+    prefer: str | None, fallback: str | None = None
+) -> tuple[tuple[str, ...], BackendDevice | None]:
     """Resolve the card by name and return the flag value to pin it with.
 
     Device ids are positional and a reboot renumbers them, so the id stored in a
     profile can name different hardware today. With one device there is nothing to
     pin and no flag is returned.
+
+    With no preference the backend's first device is not a safe default: on a laptop
+    it is the integrated GPU, and a measurement taken there describes the wrong chip
+    while every other reading still points at the discrete card. So the card setpoint
+    budgets for is asked for instead, and `fallback` overrides which that is.
     """
     try:
         listing = LlamaCppBackend().devices()
     except BackendError:
         return (), None
-    chosen = select_device(listing, prefer) if listing else None
+    if not listing:
+        return (), None
+    wanted = prefer or fallback or _budgeted_card()
+    chosen = select_device(listing, wanted)
     if chosen is None or len(listing) < 2:
         return (), chosen
     return (chosen.id,), chosen
+
+
+def _budgeted_card() -> str | None:
+    """The GPU the rest of setpoint plans against, by name."""
+    from .hardware import probe
+
+    try:
+        snapshot = probe(include_wddm=False)
+    except Exception:  # noqa: BLE001
+        return None
+    return snapshot.gpus[0].name if snapshot.gpus else None
 
 
 def free_port() -> int:
