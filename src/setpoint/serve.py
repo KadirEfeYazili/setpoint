@@ -15,7 +15,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .backend import BackendDevice, BackendError, LlamaCppBackend, select_device, server_argv
@@ -28,13 +28,23 @@ POLL_S = 1.0
 
 @dataclass(frozen=True)
 class Reply:
-    """One answer, with what it cost to produce."""
+    """One answer, with what it cost to produce.
+
+    The prompt has two lengths and they are not the same number. `prompt_tokens` is how
+    long the prompt was; `prompt_processed` is how much of it the server actually had to
+    run, the rest having come from the cache. Dividing one by a rate derived from the
+    other is how this module once reported fifteen seconds of prefill that never
+    happened, so `prompt_ms` is carried as the server reports it.
+    """
 
     text: str
     decode_tok_s: float | None = None
     prompt_tok_s: float | None = None
     tokens: int | None = None
     prompt_tokens: int | None = None
+    prompt_processed: int | None = None
+    prompt_ms: float | None = None
+    cached_tokens: int | None = None
     detail: str | None = None
 
     @property
@@ -172,13 +182,7 @@ class Session:
                 if event.get("timings") or event.get("usage"):
                     self.last = _reply_of({**event, "choices": []})
         if self.last is not None:
-            self.last = Reply(
-                text="".join(text),
-                decode_tok_s=self.last.decode_tok_s,
-                prompt_tok_s=self.last.prompt_tok_s,
-                tokens=self.last.tokens,
-                prompt_tokens=self.last.prompt_tokens,
-            )
+            self.last = replace(self.last, text="".join(text))
 
     def counters(self) -> dict[str, int]:
         """The server's speculation counters, which say whether a drafter fired."""
@@ -203,12 +207,16 @@ def _reply_of(body: dict) -> Reply:
     message = choices[0].get("message") or {}
     timings = body.get("timings") or {}
     usage = body.get("usage") or {}
+    cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
     return Reply(
         text=str(message.get("content") or ""),
         decode_tok_s=timings.get("predicted_per_second"),
         prompt_tok_s=timings.get("prompt_per_second"),
         tokens=usage.get("completion_tokens") or timings.get("predicted_n"),
-        prompt_tokens=usage.get("prompt_tokens") or timings.get("prompt_n"),
+        prompt_tokens=usage.get("prompt_tokens"),
+        prompt_processed=timings.get("prompt_n"),
+        prompt_ms=timings.get("prompt_ms"),
+        cached_tokens=cached if cached is not None else timings.get("cache_n"),
     )
 
 

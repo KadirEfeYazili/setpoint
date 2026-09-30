@@ -87,6 +87,44 @@ class TestReply:
         assert reply.tokens == 12
         assert reply.ok
 
+    def test_a_cached_prefix_does_not_look_like_a_processed_one(self):
+        # The two numbers are not the same and once were merged into one field:
+        # the prompt was 706 tokens long, one of them was processed, and dividing
+        # the first by a rate derived from the second reported fifteen seconds of
+        # prefill that never happened.
+        body = {
+            "choices": [{"message": {"content": "hello"}}],
+            "timings": {
+                "cache_n": 705,
+                "prompt_n": 1,
+                "prompt_ms": 31.497,
+                "prompt_per_second": 31.75,
+                "predicted_per_second": 81.95,
+            },
+            "usage": {
+                "prompt_tokens": 706,
+                "completion_tokens": 8,
+                "prompt_tokens_details": {"cached_tokens": 705},
+            },
+        }
+        reply = serve._reply_of(body)
+        assert reply.prompt_tokens == 706
+        assert reply.prompt_processed == 1
+        assert reply.cached_tokens == 705
+        assert reply.prompt_ms == 31.497
+
+    def test_prefill_time_is_taken_from_the_server_not_derived(self):
+        # Deriving it as prompt_tokens / prompt_per_second is wrong whenever any of
+        # the prompt was cached, which in a conversation is almost always.
+        body = {
+            "choices": [{"message": {"content": "x"}}],
+            "timings": {"prompt_n": 706, "prompt_ms": 1032.801, "prompt_per_second": 683.58},
+            "usage": {"prompt_tokens": 706},
+        }
+        reply = serve._reply_of(body)
+        assert reply.prompt_ms == 1032.801
+        assert reply.cached_tokens is None
+
     def test_an_answer_without_timings_still_carries_its_text(self):
         # The measurement is the point, but losing it must not lose the reply.
         reply = serve._reply_of({"choices": [{"message": {"content": "hi"}}]})
