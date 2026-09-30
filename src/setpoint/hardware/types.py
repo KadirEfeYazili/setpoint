@@ -126,6 +126,24 @@ class HostInfo:
 
 
 @dataclass(frozen=True)
+class GpuProcess:
+    """A process holding the card, as far as the driver will say.
+
+    `vram_mib` is None where the driver declines to attribute memory rather than
+    where the process holds none. Under WDDM the display driver owns the allocations
+    and NVML lists the processes without sizing any of them, which was measured here.
+    """
+
+    pid: int
+    name: str | None = None
+    vram_mib: int | None = None
+
+    @property
+    def attributed(self) -> bool:
+        return self.vram_mib is not None
+
+
+@dataclass(frozen=True)
 class HardwareSnapshot:
     """Everything setpoint knows about this machine at one instant."""
 
@@ -134,6 +152,7 @@ class HardwareSnapshot:
     gpus: tuple[GpuStatic, ...] = ()
     samples: tuple[GpuSample, ...] = ()
     adapters: tuple[AdapterMemory, ...] = ()
+    processes: tuple[GpuProcess, ...] = ()
     notes: tuple[str, ...] = ()
 
     def sample_for(self, index: int) -> GpuSample | None:

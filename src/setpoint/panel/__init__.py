@@ -15,6 +15,7 @@ from .data import (
     ChatTarget,
     HistoryEntry,
     ProfileView,
+    ResidencyView,
     Row,
     Snapshot,
     gather,
@@ -24,6 +25,7 @@ from .data import (
     read_chat_target,
     read_history,
     read_profiles,
+    read_residency,
 )
 
 __all__ = [
@@ -31,6 +33,7 @@ __all__ = [
     "ChatTarget",
     "HistoryEntry",
     "ProfileView",
+    "ResidencyView",
     "Row",
     "Snapshot",
     "available",
@@ -41,6 +44,7 @@ __all__ = [
     "read_chat_target",
     "read_history",
     "read_profiles",
+    "read_residency",
     "run",
 ]
 
