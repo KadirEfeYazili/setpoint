@@ -36,6 +36,28 @@ class KvEstimate:
 
 
 @dataclass(frozen=True)
+class PromptCacheEstimate:
+    """What parking conversations in host RAM costs, and what the ceiling permits."""
+
+    context: int
+    ceiling_bytes: int
+    bytes_per_conversation: int
+    notes: tuple[str, ...] = field(default_factory=tuple)
+
+    @property
+    def conversations_under_ceiling(self) -> int:
+        if self.bytes_per_conversation <= 0:
+            return 0
+        return self.ceiling_bytes // self.bytes_per_conversation
+
+    def conversations_within(self, bytes_available: int) -> int:
+        """How many fit in the RAM actually free, which is the binding limit."""
+        if self.bytes_per_conversation <= 0 or bytes_available <= 0:
+            return 0
+        return min(self.conversations_under_ceiling, bytes_available // self.bytes_per_conversation)
+
+
+@dataclass(frozen=True)
 class VramBudget:
     """What is actually available, after everything that is not ours is subtracted."""
 
@@ -116,6 +138,7 @@ class BudgetPlan:
     vram: VramBudget
     offload: OffloadPlan
     kv: KvEstimate | None = None
+    prompt_cache: PromptCacheEstimate | None = None
     alternatives: tuple[Alternative, ...] = field(default_factory=tuple)
     candidates: tuple[Candidate, ...] = field(default_factory=tuple)
     host_ram_bytes: int | None = None
@@ -205,6 +228,17 @@ class BudgetPlan:
                 "total_bytes": self.kv.total_bytes,
                 "bytes_per_token": self.kv.bytes_per_token,
                 "upper_bound": self.kv.upper_bound,
+            }
+        )
+        payload["prompt_cache"] = (
+            None
+            if self.prompt_cache is None
+            else {
+                "context": self.prompt_cache.context,
+                "ceiling_bytes": self.prompt_cache.ceiling_bytes,
+                "bytes_per_conversation": self.prompt_cache.bytes_per_conversation,
+                "conversations_under_ceiling": self.prompt_cache.conversations_under_ceiling,
+                "notes": list(self.prompt_cache.notes),
             }
         )
         return payload
