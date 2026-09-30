@@ -2,18 +2,20 @@
 
 Imported only when the tui extra is installed, so nothing here may be referenced from
 the rest of setpoint. The app holds no measurement logic: it polls `data.gather` for
-what is already known and, when asked, runs the existing `tune` command as a subprocess
-and streams what it prints.
+what is already known and, when asked, runs the existing commands rather than
+reimplementing them -- `tune` as a subprocess, and the chat as a client to a server
+started from the stored profile.
 """
 
 from __future__ import annotations
 
 import subprocess
 import sys
+import time
 
 from textual import work
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import (
     DataTable,
     Footer,
@@ -26,7 +28,9 @@ from textual.widgets import (
     TabPane,
 )
 
-from .. import banner
+from .. import banner, chat, serve
+from ..backend import BackendError, find_server_binary
+from ..hardware import GpuWatcher
 from . import data
 
 CSS = """
@@ -43,7 +47,15 @@ DataTable { height: auto; max-height: 60%; }
 .heading { text-style: bold; padding: 1 0 0 0; }
 .note { color: $text-muted; }
 RichLog { height: 1fr; border: round $panel; }
+#transcript { height: 1fr; }
+#live { color: $text-muted; padding: 0 1; height: auto; }
+#say { dock: bottom; }
+.chat { padding: 0 1; height: 1fr; }
 """
+
+# The stream is copied into a widget, and repainting per token would spend more time
+# drawing than the model spends generating.
+LIVE_REFRESH_S = 0.08
 
 
 class Panel(App):
@@ -55,6 +67,7 @@ class Panel(App):
         ("q", "quit", "quit"),
         ("r", "refresh", "refresh"),
         ("t", "tune", "run tune"),
+        ("ctrl+l", "clear_chat", "clear chat"),
     ]
 
     def __init__(
@@ -66,6 +79,10 @@ class Panel(App):
         self.interval = max(0.5, interval)
         self.snapshot: data.Snapshot | None = None
         self._listed: tuple[str, ...] = ()
+        self.conversation = chat.Conversation()
+        self.target: data.ChatTarget | None = None
+        self._session: serve.Session | None = None
+        self._count = chat.estimate_tokens
 
     def compose(self) -> ComposeResult:
         yield Static(id="banner")
@@ -90,6 +107,11 @@ class Panel(App):
                 yield DataTable(id="profile-detail", show_header=False, cursor_type="none")
                 yield Label("history", classes="heading")
                 yield DataTable(id="history", cursor_type="none")
+            with TabPane("chat", id="chat"), Vertical(classes="chat"):
+                yield Label("", id="chat-status", classes="note")
+                yield RichLog(id="transcript", markup=True, wrap=True)
+                yield Static("", id="live")
+                yield Input(placeholder="ask it something", id="say")
             with TabPane("search", id="search"), VerticalScroll(classes="pane"):
                 yield Label(
                     "press t to run `setpoint tune` for the model above. "
@@ -122,6 +144,7 @@ class Panel(App):
         self._fill_rows("#card", snapshot.card.rows)
         self._fill_budget(snapshot)
         self._fill_profiles(snapshot)
+        self._fill_chat_status()
 
     def on_resize(self, _: object) -> None:
         """The mark is chosen from the width, so it is chosen again when that changes."""
@@ -241,10 +264,17 @@ class Panel(App):
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id != "model" or event.value is Select.BLANK:
             return
+        if str(event.value) != self.reference:
+            # The open server is running the previous model's configuration, so it is
+            # the wrong thing to keep talking to.
+            self.close_session()
         self.reference = str(event.value)
         self.refresh_data()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "say":
+            self.on_said(event)
+            return
         if event.input.id != "context":
             return
         try:
@@ -260,6 +290,149 @@ class Panel(App):
         view = next((v for v in self.snapshot.profiles if v.signature_id == key), None)
         if view is not None:
             self._show_profile(view)
+
+    # --- talking to it -------------------------------------------------------------
+
+    def _fill_chat_status(self) -> None:
+        """What the conversation would run on, before anything is started."""
+        found = self.query("#chat-status")
+        if not found:
+            return
+        self.target = data.read_chat_target(self.reference) if self.reference else None
+        found.first(Label).update(self._chat_status())
+
+    def _chat_status(self) -> str:
+        target = self.target
+        if target is None:
+            return "pick a model first"
+        if not target.ready:
+            return f"{target.reference}: {target.detail}. press t to measure it"
+        state = "running" if self._session is not None else "starts on the first message"
+        claimed = f"{target.claimed_tok_s:.2f} t/s" if target.claimed_tok_s else "unmeasured"
+        speculator = f", {target.speculator}" if target.speculator else ""
+        return (
+            f"{target.label}   c{target.context}{speculator}   profile says {claimed}   [{state}]"
+        )
+
+    def on_said(self, event: Input.Submitted) -> None:
+        text = event.value.strip()
+        if not text:
+            return
+        if self.target is None or not self.target.ready:
+            self.write_chat("[dim]there is no measured profile to talk on[/dim]")
+            return
+        event.input.value = ""
+        self.write_chat(f"[bold]you[/bold]  {text}")
+        self.say(text)
+
+    def action_clear_chat(self) -> None:
+        self.conversation.clear()
+        found = self.query("#transcript")
+        if found:
+            found.first(RichLog).clear()
+
+    def write_chat(self, line: str) -> None:
+        found = self.query("#transcript")
+        if found:
+            found.first(RichLog).write(line)
+
+    def set_live(self, text: str) -> None:
+        found = self.query("#live")
+        if found:
+            found.first(Static).update(text)
+
+    def close_session(self) -> None:
+        session, self._session = self._session, None
+        self.conversation.clear()
+        self._count = chat.estimate_tokens
+        if session is not None:
+            session.__exit__(None, None, None)
+
+    def on_unmount(self) -> None:
+        self.close_session()
+
+    @work(thread=True, exclusive=True)
+    def say(self, text: str) -> None:
+        """Send one message and stream the answer back into the transcript."""
+        target = self.target
+        if target is None:
+            return
+        session = self._session or self._start_session(target)
+        if session is None:
+            return
+
+        self.conversation.add(chat.Turn("user", text))
+        dropped = chat.trim(self.conversation, target.context, self._count)
+        if dropped:
+            self.call_from_thread(
+                self.write_chat, f"[dim]dropped {dropped} older turn(s) to stay in context[/dim]"
+            )
+
+        watcher = GpuWatcher()
+        pieces: list[str] = []
+        painted = 0.0
+        try:
+            with watcher:
+                for piece in session.stream(self.conversation.messages()):
+                    pieces.append(piece)
+                    now = time.monotonic()
+                    if now - painted >= LIVE_REFRESH_S:
+                        painted = now
+                        self.call_from_thread(self.set_live, "".join(pieces))
+        except (OSError, ValueError) as exc:
+            self.call_from_thread(self.set_live, "")
+            self.call_from_thread(
+                self.write_chat, f"[dim]the server stopped answering: {exc}[/dim]"
+            )
+            self.close_session()
+            return
+
+        answer = "".join(pieces)
+        measured = session.last
+        turn = chat.Turn(
+            role="assistant",
+            text=answer,
+            decode_tok_s=measured.decode_tok_s if measured else None,
+            tokens=(measured.tokens if measured and measured.tokens else self._count(answer)),
+            peak_vram_mib=watcher.result.peak_vram_mib,
+            speculator=target.speculator,
+        )
+        self.conversation.add(turn)
+        self.call_from_thread(self.set_live, "")
+        self.call_from_thread(self.write_chat, answer)
+        cost = chat.cost_line(turn, target.claimed_tok_s)
+        if cost:
+            self.call_from_thread(self.write_chat, f"[dim]{cost}[/dim]")
+
+    def _start_session(self, target: data.ChatTarget) -> serve.Session | None:
+        """Start the server on the stored configuration, saying so while it loads."""
+        binary = find_server_binary()
+        if binary is None:
+            self.call_from_thread(self.write_chat, "[dim]llama-server was not found[/dim]")
+            return None
+        devices, chosen = serve.pin_device(target.gpu)
+        if chosen is not None:
+            # Printed because ids are positional: a reboot renumbers them and a wrong
+            # card is otherwise invisible until the rate collapses.
+            self.call_from_thread(
+                self.write_chat, f"[dim]starting on {chosen.id} -- {chosen.name}[/dim]"
+            )
+        session = serve.Session(
+            binary=binary,
+            model_path=target.model_path,
+            config=target.config,
+            context=target.context,
+            devices=devices,
+        )
+        try:
+            session.__enter__()
+        except BackendError as exc:
+            self.call_from_thread(self.write_chat, f"[dim]{exc}[/dim]")
+            return None
+        self._session = session
+        self._count = chat.token_counter(session.base)
+        self.call_from_thread(self._fill_chat_status)
+        return session
 
     # --- running the real command --------------------------------------------------
 

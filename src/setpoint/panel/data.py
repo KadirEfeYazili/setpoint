@@ -118,6 +118,31 @@ class HistoryEntry:
 
 
 @dataclass(frozen=True)
+class ChatTarget:
+    """The measured configuration a conversation would run on.
+
+    Carrying the profile's own config rather than rebuilding one is the point: the
+    chat has to run on what was measured, or the rate beside each answer compares
+    against something else.
+    """
+
+    reference: str
+    label: str = ""
+    signature_id: str = ""
+    context: int = DEFAULT_CONTEXT
+    claimed_tok_s: float | None = None
+    speculator: str | None = None
+    model_path: str = ""
+    config: object = None
+    gpu: str | None = None
+    detail: str | None = None
+
+    @property
+    def ready(self) -> bool:
+        return self.detail is None
+
+
+@dataclass(frozen=True)
 class Snapshot:
     """Everything the panel needs for one refresh."""
 
@@ -320,4 +345,39 @@ def gather(
         profiles=read_profiles(),
         budget=read_budget(chosen, context, snapshot) if chosen else None,
         notes=tuple(snapshot.notes),
+    )
+
+
+def read_chat_target(reference: str, directory: Path | None = None) -> ChatTarget:
+    """The stored profile a conversation with this model would use, or why there is none.
+
+    The widest measured context wins when several exist: a conversation runs out of
+    room long before a benchmark does.
+    """
+    try:
+        path = _path_of(reference)
+        analyze(path)
+    except ModelError as exc:
+        return ChatTarget(reference=reference, detail=str(exc))
+
+    digest, size = profiles.model_digest(path)
+    matched = [
+        profile
+        for profile in profiles.load_all(directory)
+        if profile.signature.model_digest == digest and profile.signature.model_size_bytes == size
+    ]
+    if not matched:
+        return ChatTarget(reference=reference, detail="nothing measured for this model yet")
+
+    profile = max(matched, key=lambda p: p.target.context)
+    return ChatTarget(
+        reference=reference,
+        label=profile.model.label,
+        signature_id=profiles.signature_id(profile.signature),
+        context=profile.target.context,
+        claimed_tok_s=profile.measurement.decode_tok_s.median,
+        speculator=profile.config.spec_type,
+        model_path=str(profile.model.path or path),
+        config=profile.config,
+        gpu=profile.signature.gpu,
     )
