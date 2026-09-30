@@ -17,7 +17,7 @@ from .measure import (
     read_corpus,
     run,
 )
-from .providers import ServerTokenizer, server_embeddings
+from .providers import ServerTokenizer, chonkie_tokenizer, server_embeddings
 from .strategies import (
     DEFAULT_CHUNK_TOKENS,
     Strategy,
@@ -36,6 +36,7 @@ __all__ = [
     "Strategy",
     "available",
     "by_name",
+    "chonkie_tokenizer",
     "read_corpus",
     "run",
     "server_embeddings",

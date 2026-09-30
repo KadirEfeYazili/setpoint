@@ -58,6 +58,47 @@ class ServerTokenizer:
         return [self.count_tokens(text) for text in texts]
 
 
+def chonkie_tokenizer(base: str):
+    """The same tokenizer, wearing the chunking library's base class.
+
+    The library dispatches on type rather than on duck typing, so a plain object with
+    the right methods is rejected. Subclassing is done lazily here so the extra is only
+    needed when a strategy is actually run.
+    """
+    from chonkie.tokenizer import Tokenizer
+
+    class ChonkieServerTokenizer(Tokenizer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.inner = ServerTokenizer(base)
+
+        def encode(self, text: str) -> list[int]:
+            return self.inner.encode(text)
+
+        def decode(self, tokens: Sequence[int]) -> str:
+            return self.inner.decode(tokens)
+
+        def count_tokens(self, text: str) -> int:
+            return self.inner.count_tokens(text)
+
+        def encode_batch(self, texts: Sequence[str]) -> list[list[int]]:
+            return self.inner.encode_batch(texts)
+
+        def decode_batch(self, batch: Sequence[Sequence[int]]) -> list[str]:
+            return self.inner.decode_batch(batch)
+
+        def count_tokens_batch(self, texts: Sequence[str]) -> list[int]:
+            return self.inner.count_tokens_batch(texts)
+
+        def tokenize(self, text: str) -> list[int]:
+            return self.inner.encode(text)
+
+        def __repr__(self) -> str:
+            return f"ChonkieServerTokenizer({self.inner.base})"
+
+    return ChonkieServerTokenizer()
+
+
 def server_embeddings(base: str, dimension: int | None = None):
     """A chonkie embedding provider backed by a local server.
 

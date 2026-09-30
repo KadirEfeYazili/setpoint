@@ -32,6 +32,9 @@ from . import (
     speculate,
     tune,
 )
+from . import (
+    chunk as chunking,
+)
 from . import profile as profiles
 from .backend import (
     BINARY_ENV_VAR,
@@ -1313,6 +1316,194 @@ def _command(
     return True
 
 
+def cmd_chunk(args: argparse.Namespace) -> int:
+    """Measure what each chunking strategy costs on this corpus and this card."""
+    style = Style(color_enabled())
+    if not chunking.available():
+        print(
+            "setpoint: chunking needs the chunk extra. Install it with "
+            "`pip install setpoint[chunk]`.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+
+    corpus = chunking.read_corpus(Path(args.corpus), limit_bytes=args.limit)
+    if corpus.detail:
+        print(f"setpoint: {corpus.detail}", file=sys.stderr)
+        return EXIT_ERROR
+
+    server = find_server_binary()
+    if server is None:
+        print(
+            f"setpoint: {SERVER_BINARY_NAME} was not found. Put it on PATH or set "
+            f"{SERVER_ENV_VAR}.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    try:
+        embedder = analyze(resolve(args.embedder).path)
+    except ModelError as exc:
+        print(f"setpoint: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    print(style.bold("corpus"))
+    print(f"  {corpus.label}   {style.grey(short_path(Path(args.corpus)))}")
+    if not corpus.reliable:
+        print(
+            style.yellow(
+                f"  under {chunking.MIN_CORPUS_BYTES // 1024} KB: the timings will "
+                "measure startup more than chunking"
+            )
+        )
+
+    devices, chosen = serve.pin_device(args.device)
+    print(style.bold("\nembedder"))
+    print(f"  {embedder.name or embedder.architecture}   {gib(embedder.weights.total_bytes)}")
+    if chosen is not None:
+        print(f"  {style.dim('running on ' + chosen.id + ' -- ' + chosen.name)}")
+
+    session = serve.Session(
+        binary=server,
+        model_path=embedder.path,
+        config=_EmbedConfig(),
+        context=args.embed_context,
+        devices=devices,
+        extra=("--embedding", "--pooling", "mean"),
+    )
+    try:
+        with session:
+            results = _run_strategies(session, corpus, args, style)
+    except BackendError as exc:
+        print(f"setpoint: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    if args.json:
+        print(json.dumps(_chunk_mapping(corpus, results, args), indent=2))
+        return EXIT_OK
+    _render_chunk(corpus, results, args, style)
+    return EXIT_OK
+
+
+class _EmbedConfig:
+    """The fields `server_argv` reads. An embedder has no tuned profile of its own."""
+
+    n_gpu_layers = 99
+    ubatch_size = None
+    batch_size = None
+    cache_type_k = "f16"
+    cache_type_v = "f16"
+    flash_attn = False
+    spec_type = None
+    n_cpu_moe = None
+    threads = None
+
+
+def _run_strategies(session, corpus, args, style) -> list[chunking.Result]:
+    """Run each strategy in turn, saying which is being measured as it goes."""
+    tokenizer = chunking.ServerTokenizer(session.base)
+    adapter = chunking.chonkie_tokenizer(session.base)
+    embedder = None
+    results = []
+    wanted = args.strategy or None
+    for strategy in chunking.strategies(args.chunk_tokens):
+        if wanted and strategy.name not in wanted:
+            continue
+        if strategy.needs_embeddings and embedder is None:
+            embedder = chunking.server_embeddings(session.base)
+        print(style.dim(f"  measuring {strategy.name}..."), flush=True)
+        try:
+            chunker = strategy.build(adapter, embedder)
+        except Exception as exc:  # noqa: BLE001
+            results.append(chunking.Result(strategy.name, 0.0, 0, 0.0, 0.0, None, detail=str(exc)))
+            continue
+        results.append(chunking.run(strategy, chunker, corpus, tokenizer.count_tokens))
+    return results
+
+
+def _render_chunk(corpus, results, args, style) -> None:
+    print(style.bold(f"\nstrategies   chunks of {args.chunk_tokens} tokens"))
+    header = f"  {'strategy':<12}{'time':>9}{'MB/s':>8}{'chunks':>9}{'tokens':>9}{'peak vram':>12}"
+    print(style.dim(header))
+    for result in results:
+        if not result.ok:
+            print(f"  {result.strategy:<12}{style.red('did not run')}   {result.detail}")
+            continue
+        peak = f"{result.peak_vram_mib} MiB" if result.peak_vram_mib else "-"
+        print(
+            f"  {result.strategy:<12}{result.seconds:>8.1f}s"
+            f"{result.throughput(corpus.total_bytes):>8.2f}{result.chunks:>9}"
+            f"{result.tokens_median:>9.0f}{peak:>12}"
+        )
+
+    print(style.bold(f"\nwhat retrieving {args.k} of them costs"))
+    for result in results:
+        if not result.ok:
+            continue
+        context = result.context_per_query(args.k)
+        _row(
+            style,
+            result.strategy,
+            f"{context:.0f} tokens",
+            "of the generator's context, before the question",
+        )
+    for note in _chunk_notes(results):
+        print()
+        for line in wrap(f"note: {note}", term_width() - 2):
+            print(style.grey(f"  {line}"))
+
+
+def _chunk_notes(results) -> list[str]:
+    """Only what the numbers themselves support."""
+    notes = []
+    ran = [r for r in results if r.ok]
+    if not ran:
+        return notes
+    quickest = min(ran, key=lambda r: r.seconds)
+    slowest = max(ran, key=lambda r: r.seconds)
+    if slowest.seconds > quickest.seconds * 2:
+        notes.append(
+            f"{slowest.strategy} took {slowest.seconds / quickest.seconds:.0f} times as long "
+            f"as {quickest.strategy}. Whether it retrieves better is not measured here: "
+            "quality needs a labelled set, and without one setpoint makes no claim."
+        )
+    held = [r for r in ran if r.peak_vram_mib]
+    if held:
+        top = max(held, key=lambda r: r.peak_vram_mib or 0)
+        notes.append(
+            f"peak VRAM during {top.strategy} was {top.peak_vram_mib} MiB, all of it the "
+            "embedder and whatever else holds the card. That memory is not available to "
+            "the model that has to answer."
+        )
+    return notes
+
+
+def _chunk_mapping(corpus, results, args) -> dict[str, Any]:
+    """The schema `--json` promises."""
+    return {
+        "corpus": {
+            "documents": len(corpus.documents),
+            "bytes": corpus.total_bytes,
+            "reliable": corpus.reliable,
+        },
+        "chunk_tokens": args.chunk_tokens,
+        "k": args.k,
+        "strategies": [
+            {
+                "strategy": r.strategy,
+                "seconds": r.seconds,
+                "megabytes_per_second": r.throughput(corpus.total_bytes),
+                "chunks": r.chunks,
+                "tokens_median": r.tokens_median,
+                "tokens_p90": r.tokens_p90,
+                "peak_vram_mib": r.peak_vram_mib,
+                "context_per_query": r.context_per_query(args.k),
+                "detail": r.detail,
+            }
+            for r in results
+        ],
+    }
+
+
 def cmd_residency(args: argparse.Namespace) -> int:
     """Who holds the card now, and what the policy would do with each measured model."""
     style = Style(color_enabled())
@@ -2373,6 +2564,50 @@ def build_parser() -> argparse.ArgumentParser:
         help="tokens of context kept free for the answer",
     )
     p_chat.set_defaults(func=cmd_chat)
+
+    p_chunk = sub.add_parser(
+        "chunk",
+        help="measure what each chunking strategy costs on your corpus",
+        description=(
+            "Runs each strategy over the corpus and reports indexing time, throughput, "
+            "how many chunks it produced, their median size in the generator's own "
+            "tokens, and the peak VRAM reached while it ran. Quality is not reported: "
+            "that needs a labelled set, and without one setpoint makes no claim. Needs "
+            "the chunk extra."
+        ),
+    )
+    p_chunk.add_argument("corpus", help="a text file, or a directory of them")
+    p_chunk.add_argument(
+        "--embedder",
+        default="nomic-embed-text",
+        metavar="MODEL",
+        help="embedding model for the strategies that need one",
+    )
+    p_chunk.add_argument(
+        "--chunk-tokens",
+        type=int,
+        default=chunking.DEFAULT_CHUNK_TOKENS,
+        metavar="N",
+        help="target chunk size, in the generator's tokens",
+    )
+    p_chunk.add_argument(
+        "-k", type=int, default=5, metavar="N", help="chunks a query would retrieve"
+    )
+    p_chunk.add_argument(
+        "--strategy",
+        action="append",
+        metavar="NAME",
+        help="measure only this strategy; repeatable",
+    )
+    p_chunk.add_argument(
+        "--limit", type=int, metavar="BYTES", help="stop reading the corpus after this much"
+    )
+    p_chunk.add_argument(
+        "--embed-context", type=int, default=2048, metavar="N", help="embedder context"
+    )
+    p_chunk.add_argument("--device", help="accelerator to pin the embedder to, by name")
+    p_chunk.add_argument("--json", action="store_true", help="machine-readable output")
+    p_chunk.set_defaults(func=cmd_chunk)
 
     p_residency = sub.add_parser(
         "residency",
