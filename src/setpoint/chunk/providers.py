@@ -113,7 +113,10 @@ def server_embeddings(base: str, dimension: int | None = None):
         def __init__(self) -> None:
             super().__init__()
             self.base = base.rstrip("/")
-            self._tokenizer = ServerTokenizer(self.base)
+            # The library builds its own tokenizer from whatever this returns and
+            # dispatches on type, so the adapter is what has to come back, not the
+            # plain counter.
+            self._tokenizer = chonkie_tokenizer(self.base)
             self._dimension = dimension
 
         @property
