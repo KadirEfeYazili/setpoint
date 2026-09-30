@@ -41,35 +41,40 @@ def available() -> bool:
     return True
 
 
-def strategies(chunk_tokens: int = DEFAULT_CHUNK_TOKENS) -> tuple[Strategy, ...]:
-    """The strategies, in increasing order of what they cost to run."""
+def strategies(chunk_chars: int) -> tuple[Strategy, ...]:
+    """The strategies, in increasing order of what they cost to run.
+
+    The size is given in characters, already converted from the token budget against
+    this corpus. Asking a served tokenizer for every candidate split costs a round trip
+    each time and would be charged to the strategy rather than to the instrument.
+    """
     return (
         Strategy(
             name="token",
             summary="fixed windows of tokens, ignoring where sentences end",
-            build=lambda tokenizer, embedder: _token(tokenizer, chunk_tokens),
+            build=lambda tokenizer, embedder: _token(tokenizer, chunk_chars),
         ),
         Strategy(
             name="recursive",
             summary="splits on a hierarchy of separators: paragraph, sentence, word",
-            build=lambda tokenizer, embedder: _recursive(tokenizer, chunk_tokens),
+            build=lambda tokenizer, embedder: _recursive(tokenizer, chunk_chars),
         ),
         Strategy(
             name="sentence",
             summary="whole sentences packed up to the size limit",
-            build=lambda tokenizer, embedder: _sentence(tokenizer, chunk_tokens),
+            build=lambda tokenizer, embedder: _sentence(tokenizer, chunk_chars),
         ),
         Strategy(
             name="semantic",
             summary="breaks where consecutive sentences stop resembling each other",
             needs_embeddings=True,
-            build=lambda tokenizer, embedder: _semantic(embedder, chunk_tokens),
+            build=lambda tokenizer, embedder: _semantic(embedder, chunk_chars),
         ),
     )
 
 
-def by_name(name: str, chunk_tokens: int = DEFAULT_CHUNK_TOKENS) -> Strategy | None:
-    return next((s for s in strategies(chunk_tokens) if s.name == name), None)
+def by_name(name: str, chunk_chars: int) -> Strategy | None:
+    return next((s for s in strategies(chunk_chars) if s.name == name), None)
 
 
 def _token(tokenizer, chunk_tokens: int):

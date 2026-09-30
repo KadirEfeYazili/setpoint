@@ -1372,13 +1372,13 @@ def cmd_chunk(args: argparse.Namespace) -> int:
     )
     try:
         with session:
-            results = _run_strategies(session, corpus, args, style)
+            results, ratio = _run_strategies(session, corpus, args, style)
     except BackendError as exc:
         print(f"setpoint: {exc}", file=sys.stderr)
         return EXIT_ERROR
 
     if args.json:
-        print(json.dumps(_chunk_mapping(corpus, results, args), indent=2))
+        print(json.dumps(_chunk_mapping(corpus, results, args, ratio), indent=2))
         return EXIT_OK
     _render_chunk(corpus, results, args, style)
     return EXIT_OK
@@ -1398,26 +1398,37 @@ class _EmbedConfig:
     threads = None
 
 
-def _run_strategies(session, corpus, args, style) -> list[chunking.Result]:
+def _run_strategies(session, corpus, args, style) -> tuple[list[chunking.Result], float]:
     """Run each strategy in turn, saying which is being measured as it goes."""
     tokenizer = chunking.ServerTokenizer(session.base)
-    adapter = chunking.chonkie_tokenizer(session.base)
     embedder = None
     results = []
     wanted = args.strategy or None
-    for strategy in chunking.strategies(args.chunk_tokens):
+
+    # The chunkers are driven on characters, converted once against the real tokenizer.
+    # Asking the server per candidate split turned a 1.4 s strategy into 47 s, and the
+    # table would have charged that to the strategy.
+    ratio = chunking.calibrate(corpus, tokenizer.count_tokens)
+    chunk_chars = max(1, int(args.chunk_tokens * ratio))
+    print(
+        style.dim(
+            f"  {ratio:.2f} characters per token on this corpus, so "
+            f"{args.chunk_tokens} tokens is about {chunk_chars} characters"
+        )
+    )
+    for strategy in chunking.strategies(chunk_chars):
         if wanted and strategy.name not in wanted:
             continue
         if strategy.needs_embeddings and embedder is None:
             embedder = chunking.server_embeddings(session.base)
         print(style.dim(f"  measuring {strategy.name}..."), flush=True)
         try:
-            chunker = strategy.build(adapter, embedder)
+            chunker = strategy.build("character", embedder)
         except Exception as exc:  # noqa: BLE001
             results.append(chunking.Result(strategy.name, 0.0, 0, 0.0, 0.0, None, detail=str(exc)))
             continue
         results.append(chunking.run(strategy, chunker, corpus, tokenizer.count_tokens))
-    return results
+    return results, ratio
 
 
 def _render_chunk(corpus, results, args, style) -> None:
@@ -1477,7 +1488,7 @@ def _chunk_notes(results) -> list[str]:
     return notes
 
 
-def _chunk_mapping(corpus, results, args) -> dict[str, Any]:
+def _chunk_mapping(corpus, results, args, ratio: float) -> dict[str, Any]:
     """The schema `--json` promises."""
     return {
         "corpus": {
@@ -1486,6 +1497,7 @@ def _chunk_mapping(corpus, results, args) -> dict[str, Any]:
             "reliable": corpus.reliable,
         },
         "chunk_tokens": args.chunk_tokens,
+        "characters_per_token": ratio,
         "k": args.k,
         "strategies": [
             {
