@@ -1166,15 +1166,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
         )
         return EXIT_ERROR
 
-    backend = LlamaCppBackend()
-    devices: tuple[str, ...] = ()
-    try:
-        listing = backend.devices()
-    except BackendError:
-        listing = ()
-    chosen = select_device(listing, args.device or profile.signature.gpu) if listing else None
-    if chosen is not None and len(listing) > 1:
-        devices = (chosen.id,)
+    devices, chosen = serve.pin_device(args.device or profile.signature.gpu)
 
     print(style.bold("model"))
     print(f"  {profiles.signature_id(profile.signature)}   {profile.model.label}")
@@ -1266,20 +1258,9 @@ def _chat_loop(
 
 def _render_cost(turn: chat.Turn, profile: profiles.Profile, style: Style) -> None:
     """What the answer cost, next to what the profile said it would."""
-    bits = []
-    if turn.tokens is not None:
-        bits.append(f"{turn.tokens} tokens")
-    if turn.decode_tok_s:
-        claimed = profile.measurement.decode_tok_s.median
-        drift = f" ({turn.decode_tok_s / claimed - 1:+.0%} on the profile)" if claimed else ""
-        bits.append(f"{turn.decode_tok_s:.1f} t/s{drift}")
-    elif turn.tokens is not None:
-        # Never a zero: the server not reporting a rate is not a rate of nothing.
-        bits.append("rate not reported")
-    if turn.peak_vram_mib is not None:
-        bits.append(f"peak {turn.peak_vram_mib} MiB")
-    if bits:
-        print(style.dim("  " + "   ".join(bits)))
+    line = chat.cost_line(turn, profile.measurement.decode_tok_s.median)
+    if line:
+        print(style.dim("  " + line))
 
 
 def _command(

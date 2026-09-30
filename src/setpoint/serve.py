@@ -18,7 +18,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .backend import BackendError, server_argv
+from .backend import BackendDevice, BackendError, LlamaCppBackend, select_device, server_argv
 
 READY_TIMEOUT_S = 180.0
 REQUEST_TIMEOUT_S = 600.0
@@ -248,6 +248,23 @@ def parse_counters(text: str) -> dict[str, int]:
         except ValueError:
             continue
     return out
+
+
+def pin_device(prefer: str | None) -> tuple[tuple[str, ...], BackendDevice | None]:
+    """Resolve the card by name and return the flag value to pin it with.
+
+    Device ids are positional and a reboot renumbers them, so the id stored in a
+    profile can name different hardware today. With one device there is nothing to
+    pin and no flag is returned.
+    """
+    try:
+        listing = LlamaCppBackend().devices()
+    except BackendError:
+        return (), None
+    chosen = select_device(listing, prefer) if listing else None
+    if chosen is None or len(listing) < 2:
+        return (), chosen
+    return (chosen.id,), chosen
 
 
 def free_port() -> int:

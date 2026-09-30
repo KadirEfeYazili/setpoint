@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from .data import (
     Card,
+    ChatTarget,
     HistoryEntry,
     ProfileView,
     Row,
@@ -20,12 +21,14 @@ from .data import (
     known_models,
     read_budget,
     read_card,
+    read_chat_target,
     read_history,
     read_profiles,
 )
 
 __all__ = [
     "Card",
+    "ChatTarget",
     "HistoryEntry",
     "ProfileView",
     "Row",
@@ -35,6 +38,7 @@ __all__ = [
     "known_models",
     "read_budget",
     "read_card",
+    "read_chat_target",
     "read_history",
     "read_profiles",
     "run",
