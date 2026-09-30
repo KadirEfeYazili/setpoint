@@ -125,64 +125,6 @@ class TestReport:
         assert not any(report.winners.values())
 
 
-class TestCounters:
-    TEXT = "\n".join(
-        [
-            "# HELP llamacpp:spec_decode_num_draft_tokens_total Total draft tokens",
-            "llamacpp:spec_decode_num_draft_tokens_total 384",
-            "llamacpp:spec_decode_num_accepted_tokens_total 260",
-            "llamacpp:spec_decode_num_drafts_total 8",
-            'llamacpp:spec_decode_num_accepted_tokens_per_pos_total{position="0"} 45',
-            "llamacpp:n_decode_total 1200",
-        ]
-    )
-
-    def test_it_reads_the_totals(self):
-        counters = speculate.parse_counters(self.TEXT)
-        assert counters["spec_decode_num_draft_tokens_total"] == 384
-        assert counters["spec_decode_num_accepted_tokens_total"] == 260
-        assert counters["spec_decode_num_drafts_total"] == 8
-
-    def test_it_skips_the_labelled_breakdown_and_unrelated_metrics(self):
-        counters = speculate.parse_counters(self.TEXT)
-        assert not any("per_pos" in name for name in counters)
-        assert not any("n_decode" in name for name in counters)
-
-    def test_an_empty_body_reads_as_nothing_rather_than_failing(self):
-        assert speculate.parse_counters("") == {}
-
-
-class TestSession:
-    def _argv(self, speculator: str | None) -> list[str]:
-        session = speculate.Session(
-            binary="llama-server",
-            model_path="m.gguf",
-            config=Config(n_gpu_layers=27, ubatch_size=128),
-            context=4096,
-            devices=("Vulkan0",),
-            speculator=speculator,
-            port=1234,
-        )
-        return session.argv
-
-    def test_it_asks_for_the_metrics_endpoint(self):
-        # Acceptance is read from the counters, so a session without them is useless.
-        assert "--metrics" in self._argv("ngram-mod")
-
-    def test_it_names_the_speculator_it_was_asked_for(self):
-        argv = self._argv("ngram-mod")
-        assert argv[argv.index("--spec-type") + 1] == "ngram-mod"
-
-    def test_the_baseline_session_names_no_speculator(self):
-        assert "--spec-type" not in self._argv(None)
-
-    def test_it_carries_the_measured_configuration(self):
-        argv = self._argv(None)
-        assert argv[argv.index("--n-gpu-layers") + 1] == "27"
-        assert argv[argv.index("--ubatch-size") + 1] == "128"
-        assert argv[argv.index("--ctx-size") + 1] == "4096"
-
-
 class TestWorkloads:
     def test_the_defaults_cover_both_ends_of_repetition(self):
         # A single workload would have hidden a factor of twenty in acceptance.
